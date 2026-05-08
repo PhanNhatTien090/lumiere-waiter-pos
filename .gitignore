@@ -1,0 +1,29 @@
+# dependencies
+node_modules
+
+# expo
+.expo
+dist
+web-build
+android/
+ios/
+
+# local env files
+.env
+.env.local
+
+# logs
+*.log
+
+# misc
+.DS_Store
+Thumbs.db
+*.pem
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# typescript
+*.tsbuildinfo

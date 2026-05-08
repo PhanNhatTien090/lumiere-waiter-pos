@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Lumière Waiter",
+    "slug": "waiter-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#18181b"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.lumiere.waiter"
+    },
+    "android": {
+      "package": "com.lumiere.waiter",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#18181b"
+      },
+      "permissions": []
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "scheme": "lumiere-waiter"
+  }
+}

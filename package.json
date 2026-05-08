@@ -1,0 +1,35 @@
+{
+  "name": "waiter-app",
+  "version": "1.0.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start --tunnel --clear",
+    "android": "expo start --android --tunnel --clear",
+    "ios": "expo start --ios --tunnel --clear",
+    "web": "expo start --web",
+    "eas:configure": "eas build:configure",
+    "eas:build:android": "eas build --platform android --profile development",
+    "eas:build:ios": "eas build --platform ios --profile development"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@stomp/stompjs": "^7.3.0",
+    "axios": "^1.7.4",
+    "expo": "^54.0.0",
+    "expo-constants": "~18.0.13",
+    "expo-linking": "~8.0.12",
+    "expo-router": "~6.0.23",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-screens": "~4.16.0",
+    "react-native-web": "^0.21.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.10",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
