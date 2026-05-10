@@ -1,10 +1,10 @@
 import axiosInstance from "./client";
 import {
   ApiResponse,
-  AssignSupportRequestBody,
   AuthPayload,
   CancelOrderRequest,
   CategoryResponse,
+  CreateOrderRequest,
   CreatePaymentRequest,
   CreateSupportRequest,
   LoginRequest,
@@ -15,8 +15,8 @@ import {
   PaymentResponse,
   PaymentStatusResponse,
   SupportRequestResponse,
+  SupportRequestStatus,
   TableResponse,
-  UpdateSupportStatusBody,
   UpdateTableStatusRequest,
 } from "../types";
 
@@ -47,6 +47,8 @@ export const orderAPI = {
     axiosInstance.get<ApiResponse<OrderResponse[]>>("/orders", {
       params: status ? { status } : undefined,
     }),
+  createOrder: (payload: CreateOrderRequest) =>
+    axiosInstance.post<ApiResponse<OrderResponse>>("/orders", payload),
   getOrder: (orderId: number) => axiosInstance.get<ApiResponse<OrderResponse>>(`/orders/${orderId}`),
   getInvoiceJson: (orderId: number) =>
     axiosInstance.get<ApiResponse<OrderInvoiceJson>>(`/orders/${orderId}/invoice`),
@@ -66,10 +68,10 @@ export const supportAPI = {
     axiosInstance.get<ApiResponse<SupportRequestResponse[]>>(`/support/table/${encodeURIComponent(tableCode)}`),
   listAll: () => axiosInstance.get<ApiResponse<SupportRequestResponse[]>>("/support"),
   getOne: (id: number) => axiosInstance.get<ApiResponse<SupportRequestResponse>>(`/support/${id}`),
-  assign: (id: number, body: AssignSupportRequestBody) =>
-    axiosInstance.put<ApiResponse<SupportRequestResponse>>(`/support/${id}/assign`, body),
-  updateStatus: (id: number, body: UpdateSupportStatusBody) =>
-    axiosInstance.put<ApiResponse<SupportRequestResponse>>(`/support/${id}/status`, body),
+  assign: (id: number, staffId: number) =>
+    axiosInstance.put<ApiResponse<SupportRequestResponse>>(`/support/${id}/assign`, null, { params: { staffId } }),
+  updateStatus: (id: number, status: SupportRequestStatus) =>
+    axiosInstance.put<ApiResponse<SupportRequestResponse>>(`/support/${id}/status`, null, { params: { status } }),
 };
 
 export const paymentAPI = {

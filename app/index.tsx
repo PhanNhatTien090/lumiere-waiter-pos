@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
   Platform,
   Pressable,
   RefreshControl,
@@ -11,6 +12,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -29,6 +31,7 @@ import {
 } from "../src/constants/posUi";
 import { useWaiterStore } from "../src/store/waiterStore";
 import { useWaiterSocket } from "../src/hooks/useWaiterSocket";
+import { useAudioNotification } from "../src/hooks/useAudioNotification";
 import {
   CategoryResponse,
   MenuItemResponse,
@@ -120,6 +123,10 @@ export default function WaiterMobileScreen() {
     setSelectedOrder,
   } = useWaiterStore();
 
+  // ─── Audio notification (Web Audio API, matching KDS pattern) ─────────────
+  const { unlock, playNewOrder, playPaymentSuccess, playAlert, playOrderReady } = useAudioNotification();
+  const [soundEnabled, setSoundEnabled] = useState(true);
+
   // Ref keeps the latest categories value accessible inside fetchMenu
   // without adding `categories` to useCallback deps (avoids double-fetch on load).
   const categoriesRef = useRef<CategoryResponse[]>([]);
@@ -136,6 +143,23 @@ export default function WaiterMobileScreen() {
   const [tableFilter, setTableFilter] = useState<"all" | TableStatus>("all");
   const [tableSearch, setTableSearch] = useState("");
   const [menuCatFilter, setMenuCatFilter] = useState("all");
+  const [menuItemNames, setMenuItemNames] = useState<Record<number, string>>({});
+
+  // Create-order modal
+  const [createOrderTable, setCreateOrderTable] = useState<TableResponse | null>(null);
+  const [createCart, setCreateCart] = useState<Record<number, number>>({});
+  const [createNote, setCreateNote] = useState("");
+  const [createOrderCatFilter, setCreateOrderCatFilter] = useState<"all" | number>("all");
+  const [submittingOrder, setSubmittingOrder] = useState(false);
+
+  // Per-status order count for each status chip
+  const [orderCountByStatus, setOrderCountByStatus] = useState<Record<string, number>>({});
+  // Count of new CREATED orders not yet seen by the waiter (drives audio + badge)
+  const [unseenCreatedCount, setUnseenCreatedCount] = useState(0);
+  // Track the set of order IDs seen in the current polling window to detect NEW arrivals
+  const knownOrderIdsRef = useRef<Set<number>>(new Set());
+  // Stable ref to fetchCounts so WebSocket callbacks can call it without stale closure
+  const fetchCountsRef = useRef<() => Promise<void>>(async () => {});
 
   const role = staff?.role;
   const roleStatuses = useMemo(() => (role ? ORDER_STATUS_BY_ROLE[role] : ["CREATED"]) as OrderStatus[], [role]);
@@ -146,6 +170,7 @@ export default function WaiterMobileScreen() {
 
     // /topic/waiter/ready — ALL items in an order are DONE → full alert
     onOrderReady: (payload) => {
+      if (soundEnabled) playOrderReady();
       Alert.alert(
         "🍽 Món đã sẵn sàng",
         `Order #${payload.orderId} — Bàn #${payload.tableId} đã sẵn sàng phục vụ!`,
@@ -156,10 +181,20 @@ export default function WaiterMobileScreen() {
 
     // /topic/waiter/new-order — customer placed a new order via QR
     onNewOrder: (newOrder) => {
+      if (soundEnabled) playNewOrder();
       upsertOrder(newOrder);
+      // Track as unseen and bump the CREATED counter immediately
+      knownOrderIdsRef.current.add(newOrder.id);
+      setUnseenCreatedCount((prev) => prev + 1);
+      setOrderCountByStatus((prev) => ({
+        ...prev,
+        CREATED: (prev["CREATED"] ?? 0) + 1,
+      }));
+      void fetchCountsRef.current();
       Alert.alert(
-        "📦 Đơn mới",
-        `Bàn #${newOrder.tableId} vừa đặt đơn #${newOrder.id} (${newOrder.items.length} món).`,
+        "📦 Đơn mới từ QR",
+        `Bàn #${newOrder.tableId} vừa đặt đơn #${newOrder.id}\n` +
+        `📋 ${newOrder.items.length} món · ${formatMoney(newOrder.totalAmount ?? 0)}`,
         [{ text: "OK" }]
       );
     },
@@ -170,6 +205,37 @@ export default function WaiterMobileScreen() {
       void orderAPI.getOrder(payload.orderId)
         .then((res) => upsertOrder(res.data.data))
         .catch(() => { /* non-critical — next poll will sync */ });
+    },
+
+    // /topic/waiter/support-request — customer created a new support request
+    onNewSupportRequest: (req) => {
+      if (soundEnabled) playAlert();
+      setSupportRequests((prev) =>
+        prev.some((r) => r.id === req.id)
+          ? prev.map((r) => (r.id === req.id ? req : r))
+          : [req, ...prev]
+      );
+      Alert.alert(
+        "🔔 Yêu cầu hỗ trợ mới",
+        `Bàn ${req.tableCode}: "${req.message ?? "Cần hỗ trợ"}"`,
+        [{ text: "OK" }]
+      );
+    },
+
+    // /topic/waiter/payment-success — payment completed → sound + refresh tables
+    onPaymentSuccess: (payload) => {
+      if (soundEnabled) playPaymentSuccess();
+      Alert.alert(
+        "✅ Thanh toán thành công",
+        `Order #${payload.orderId} — Bàn #${payload.tableId}\n` +
+        `💰 ${formatMoney(payload.amount ?? 0)}\n` +
+        `🧹 Bàn chuyển sang trạng thái: Đang dọn`,
+        [{ text: "OK" }]
+      );
+      // Refresh tables to show CLEANING status
+      void fetchTables(true);
+      // Refresh orders to show PAID status
+      void fetchOrders(orderStatus, true);
     },
   });
 
@@ -220,11 +286,18 @@ export default function WaiterMobileScreen() {
       }
 
       if (menuCatFilter === "all") {
-        const results = await Promise.all(activeCats.map((cat) => menuAPI.listByCategory(cat.id)));
-        setMenuItems(results.flatMap((r) => r.data.data));
+        const results = await Promise.all(
+          activeCats.map((cat) =>
+            menuAPI.listByCategory(cat.id).then((r) =>
+              r.data.data.map((item) => ({ ...item, categoryId: item.categoryId ?? cat.id }))
+            )
+          )
+        );
+        setMenuItems(results.flat());
       } else {
-        const res = await menuAPI.listByCategory(Number(menuCatFilter));
-        setMenuItems(res.data.data);
+        const filterId = Number(menuCatFilter);
+        const res = await menuAPI.listByCategory(filterId);
+        setMenuItems(res.data.data.map((item) => ({ ...item, categoryId: item.categoryId ?? filterId })));
       }
     } catch (err: any) {
       setError(err?.response?.data?.message || "Không thể tải thực đơn");
@@ -241,13 +314,30 @@ export default function WaiterMobileScreen() {
       if (!silent) setLoading(true);
       if (!silent) setError(null);
       const response = await orderAPI.listOrders(status);
-      setOrders(response.data.data);
+      const fresh = response.data.data as OrderResponse[];
+
+      // ── Smart new-order detection (runs on every 8s poll) ─────────────────
+      // Only detect new CREATED orders to avoid false positives from other statuses
+      if (status === "CREATED" && knownOrderIdsRef.current.size > 0) {
+        const newOnes = fresh.filter((o) => !knownOrderIdsRef.current.has(o.id));
+        if (newOnes.length > 0) {
+          if (soundEnabled) playNewOrder();
+          setUnseenCreatedCount((prev) => prev + newOnes.length);
+        }
+      }
+      // Rebuild the known-IDs set for the CREATED status each poll
+      if (status === "CREATED") {
+        knownOrderIdsRef.current = new Set(fresh.map((o) => o.id));
+      }
+
+      setOrders(fresh);
     } catch (err: any) {
       setError(err?.response?.data?.message || "Không thể tải danh sách đơn");
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [accessToken, setError, setLoading, setOrders]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, setError, setLoading, setOrders, soundEnabled, playNewOrder]);
 
   const fetchSupport = useCallback(
     async (silent = false) => {
@@ -312,6 +402,40 @@ export default function WaiterMobileScreen() {
     };
   }, [accessToken, activeTab, fetchOrders, orderStatus, role]);
 
+  // ─── Background CREATED-orders poll (all tabs) ────────────────────────────
+  // Runs even when the user is on the Tables / Support / Menu tab so audio
+  // fires the moment a new QR order arrives, regardless of active tab.
+  useEffect(() => {
+    if (!accessToken || !role) return;
+    if (!(role === "WAITER" || role === "MANAGER")) return;
+    // Already handled by the main orders poll above when on the orders tab
+    if (activeTab === "orders" && orderStatus === "CREATED") return;
+
+    const timerId = setInterval(async () => {
+      try {
+        const res = await orderAPI.listOrders("CREATED");
+        const fresh = (res.data.data ?? []) as OrderResponse[];
+        if (knownOrderIdsRef.current.size > 0) {
+          const newOnes = fresh.filter((o) => !knownOrderIdsRef.current.has(o.id));
+          if (newOnes.length > 0) {
+            if (soundEnabled) playNewOrder();
+            setUnseenCreatedCount((prev) => prev + newOnes.length);
+            setOrderCountByStatus((prev) => ({
+              ...prev,
+              CREATED: fresh.length,
+            }));
+          }
+        }
+        knownOrderIdsRef.current = new Set(fresh.map((o) => o.id));
+      } catch {
+        /* non-critical */
+      }
+    }, 10_000);
+
+    return () => clearInterval(timerId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, activeTab, orderStatus, role, soundEnabled, playNewOrder]);
+
   useEffect(() => {
     if (!accessToken || !role || activeTab !== "support") {
       return;
@@ -359,6 +483,35 @@ export default function WaiterMobileScreen() {
   );
   const openSupportCount = useMemo(() => supportRequests.filter((r) => r.status === "CREATED").length, [supportRequests]);
 
+  // Fetch per-status order counts for badge display on status chips
+  useEffect(() => {
+    if (!accessToken || !role) return;
+
+    const fetchCounts = async () => {
+      const counts: Record<string, number> = {};
+      try {
+        const statusList = role ? ORDER_STATUS_BY_ROLE[role] : ["CREATED"];
+        const results = await Promise.allSettled(
+          statusList.map((s) => orderAPI.listOrders(s as any))
+        );
+        statusList.forEach((s, idx) => {
+          const r = results[idx];
+          counts[s] = r.status === "fulfilled" ? r.value.data.data.length : 0;
+        });
+      } catch {
+        /* best-effort */
+      }
+      setOrderCountByStatus(counts);
+    };
+
+    // Expose via ref so WebSocket callbacks can trigger a refresh immediately
+    fetchCountsRef.current = fetchCounts;
+
+    void fetchCounts();
+    const timerId = setInterval(() => void fetchCounts(), 15_000);
+    return () => clearInterval(timerId);
+  }, [accessToken, role]);
+
   // Categories come directly from /menu/categories (sorted by displayOrder on fetch).
   // Items are pre-filtered by the API, so visibleMenuItems = menuItems.
   const visibleMenuItems = menuItems;
@@ -368,6 +521,25 @@ export default function WaiterMobileScreen() {
     const matchSearch = !tableSearch.trim() || t.tableCode.toLowerCase().includes(tableSearch.toLowerCase());
     return matchStatus && matchSearch;
   }), [tables, tableFilter, tableSearch]);
+
+  const filteredCreateOrderItems = useMemo(
+    () =>
+      createOrderCatFilter === "all"
+        ? menuItems
+        : menuItems.filter((m) => m.categoryId === createOrderCatFilter),
+    [menuItems, createOrderCatFilter]
+  );
+
+  const cartStats = useMemo(() => {
+    let total = 0;
+    let count = 0;
+    Object.entries(createCart).forEach(([id, qty]) => {
+      const item = menuItems.find((m) => m.id === Number(id));
+      if (item) total += item.price * qty;
+      count += qty;
+    });
+    return { total, count, types: Object.keys(createCart).length };
+  }, [createCart, menuItems]);
 
   async function handleManualRefresh() {
     setRefreshing(true);
@@ -411,7 +583,27 @@ export default function WaiterMobileScreen() {
     try {
       setLoading(true);
       const response = await orderAPI.getOrder(order.id);
-      upsertOrder(response.data.data);
+      const orderData = response.data.data;
+      upsertOrder(orderData);
+      setSelectedOrder(orderData);
+
+      // Fetch names for items not already in store or local cache
+      const idsToFetch = [...new Set(
+        orderData.items
+          .map((i) => i.menuItemId)
+          .filter((id) => !menuItems.find((m) => m.id === id) && !menuItemNames[id])
+      )];
+      if (idsToFetch.length > 0) {
+        const results = await Promise.allSettled(idsToFetch.map((id) => menuAPI.getMenuItem(id)));
+        const newNames: Record<number, string> = {};
+        idsToFetch.forEach((id, idx) => {
+          const r = results[idx];
+          if (r.status === "fulfilled") newNames[id] = r.value.data.data.name;
+        });
+        if (Object.keys(newNames).length > 0) {
+          setMenuItemNames((prev) => ({ ...prev, ...newNames }));
+        }
+      }
     } catch (err: any) {
       setError(err?.response?.data?.message || "Không tải được chi tiết đơn");
     } finally {
@@ -489,6 +681,108 @@ export default function WaiterMobileScreen() {
     }
   }
 
+  async function handleOpenCreateOrder(table: TableResponse) {
+    setCreateOrderTable(table);
+    setCreateCart({});
+    setCreateNote("");
+    setCreateOrderCatFilter("all");
+
+    if (!accessToken || !(role === "WAITER" || role === "MANAGER")) return;
+
+    // Force-load all menu items for the modal — fetchMenu honors menuCatFilter
+    // which may exclude categories the user wants to add to the new order.
+    try {
+      let cats = categoriesRef.current;
+      if (cats.length === 0) {
+        const catRes = await menuAPI.listCategories();
+        cats = [...catRes.data.data].sort((a, b) => a.displayOrder - b.displayOrder);
+        setCategories(cats);
+        categoriesRef.current = cats;
+      }
+      const results = await Promise.all(
+        cats.map((cat) =>
+          menuAPI.listByCategory(cat.id).then((r) =>
+            r.data.data.map((item) => ({ ...item, categoryId: item.categoryId ?? cat.id }))
+          )
+        )
+      );
+      setMenuItems(results.flat());
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Không thể tải thực đơn");
+    }
+  }
+
+  function handleCloseCreateOrder() {
+    setCreateOrderTable(null);
+    setCreateCart({});
+    setCreateNote("");
+  }
+
+  function handleAddToCart(menuItemId: number) {
+    setCreateCart((prev) => ({ ...prev, [menuItemId]: (prev[menuItemId] ?? 0) + 1 }));
+  }
+
+  function handleRemoveFromCart(menuItemId: number) {
+    setCreateCart((prev) => {
+      const current = prev[menuItemId] ?? 0;
+      if (current <= 1) {
+        const { [menuItemId]: _removed, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [menuItemId]: current - 1 };
+    });
+  }
+
+  async function handleSubmitCreateOrder() {
+    if (!createOrderTable) return;
+    const items = Object.entries(createCart)
+      .filter(([, qty]) => qty > 0)
+      .map(([id, qty]) => ({
+        menuItemId: Number(id),
+        quantity: qty,
+        note: null,
+        comboSelection: null,
+      }));
+
+    if (items.length === 0) {
+      Alert.alert("Thiếu thông tin", "Vui lòng chọn ít nhất 1 món trước khi tạo đơn.");
+      return;
+    }
+
+    try {
+      setSubmittingOrder(true);
+      setError(null);
+      const created = await orderAPI.createOrder({
+        tableCode: createOrderTable.tableCode,
+        note: createNote.trim() || null,
+        splitBillAllowed: false,
+        items,
+      });
+      const orderId = created.data.data.id;
+      upsertOrder(created.data.data);
+
+      // Auto-confirm to skip the manual CREATED → CONFIRMED step
+      try {
+        const confirmed = await orderAPI.confirmOrder(orderId);
+        upsertOrder(confirmed.data.data);
+        Alert.alert("Đã tạo đơn", `Đơn #${orderId} cho bàn ${createOrderTable.tableCode} đã được gửi tới bếp.`);
+      } catch {
+        Alert.alert(
+          "Đã tạo đơn",
+          `Đơn #${orderId} đã được tạo nhưng chưa xác nhận. Vui lòng xác nhận thủ công ở tab Đơn.`
+        );
+      }
+
+      handleCloseCreateOrder();
+      void fetchTables(true);
+      void fetchOrders(orderStatus, true);
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Tạo đơn thất bại");
+    } finally {
+      setSubmittingOrder(false);
+    }
+  }
+
   async function handleCreatePayment(order: OrderResponse) {
     const provider: PaymentProvider = paymentMethod === "CASH" ? "CASH" : "VIETQR";
 
@@ -503,10 +797,22 @@ export default function WaiterMobileScreen() {
         bankCode: null,
       });
 
-      Alert.alert("Thanh toán", `Trạng thái: ${response.data.data.status}`);
+      const payStatus = response.data.data.status;
+      if (payStatus === "COMPLETED" || payStatus === "SUCCESS") {
+        if (soundEnabled) playPaymentSuccess();
+        Alert.alert(
+          "✅ Thanh toán thành công",
+          `Order #${order.id} — ${formatMoney(order.totalAmount ?? 0)}\n🧹 Bàn chuyển sang trạng thái: Đang dọn`
+        );
+      } else {
+        Alert.alert("Thanh toán", `Trạng thái: ${payStatus}`);
+      }
+
       const next = await orderAPI.getOrder(order.id);
       upsertOrder(next.data.data);
       await fetchOrders(orderStatus, true);
+      // Refresh tables to reflect CLEANING status
+      void fetchTables(true);
     } catch (err: any) {
       setError(err?.response?.data?.message || "Tạo thanh toán thất bại");
     } finally {
@@ -530,8 +836,13 @@ export default function WaiterMobileScreen() {
     if (!staff) return;
     try {
       setLoading(true);
-      const res = await supportAPI.assign(req.id, { staffId: staff.id });
-      setSupportRequests((prev) => prev.map((r) => (r.id === req.id ? res.data.data : r)));
+      const res = await supportAPI.assign(req.id, staff.id);
+      const updated = res.data?.data;
+      if (updated) {
+        setSupportRequests((prev) => prev.map((r) => (r.id === req.id ? updated : r)));
+      } else {
+        await fetchSupport(true);
+      }
       Alert.alert("Đã giao", `Yêu cầu #${req.id} đã giao cho bạn.`);
     } catch (err: any) {
       setError(err?.response?.data?.message || "Giao việc thất bại");
@@ -543,8 +854,13 @@ export default function WaiterMobileScreen() {
   async function handleSupportUpdateStatus(req: SupportRequestResponse, status: SupportRequestStatus) {
     try {
       setLoading(true);
-      const res = await supportAPI.updateStatus(req.id, { status });
-      setSupportRequests((prev) => prev.map((r) => (r.id === req.id ? res.data.data : r)));
+      const res = await supportAPI.updateStatus(req.id, status);
+      const updated = res.data?.data;
+      if (updated) {
+        setSupportRequests((prev) => prev.map((r) => (r.id === req.id ? updated : r)));
+      } else {
+        await fetchSupport(true);
+      }
       Alert.alert("Đã cập nhật", `Trạng thái: ${SUPPORT_LABEL[status]}`);
     } catch (err: any) {
       setError(err?.response?.data?.message || "Cập nhật trạng thái thất bại");
@@ -612,12 +928,18 @@ export default function WaiterMobileScreen() {
   return (
     <SafeAreaView style={styles.shellCream} edges={["top", "left", "right"]}>
       <StatusBar barStyle="dark-content" backgroundColor="#FAF8F0" />
-      <View style={styles.columnFlex}>
+      <View style={styles.columnFlex} onTouchStart={unlock}>
         <View style={styles.posPageHeader}>
           <View style={styles.flex1}>
             <Text style={styles.posTitle}>LUMIÈRE POS</Text>
             <Text style={styles.posSubtitle}>{staff.name} · {staff.role}</Text>
           </View>
+          <Pressable
+            style={({ pressed }) => [styles.soundToggleBtn, pressed && styles.buttonPressed]}
+            onPress={() => { unlock(); setSoundEnabled((prev) => !prev); }}
+          >
+            <Ionicons name={soundEnabled ? "volume-high" : "volume-mute"} size={18} color={soundEnabled ? "#C9A227" : "#9CA3AF"} />
+          </Pressable>
           <Pressable style={({ pressed }) => [styles.headerLogoutBtn, pressed && styles.buttonPressed]} onPress={handleLogout}>
             <Text style={styles.headerLogoutText}>Đăng xuất</Text>
           </Pressable>
@@ -628,15 +950,33 @@ export default function WaiterMobileScreen() {
         {(activeTab === "orders" || activeTab === "payments") && (
           <View style={styles.statusWrap}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.statusScroller}>
-              {roleStatuses.map((status) => (
+              {roleStatuses.map((status) => {
+                const count = orderCountByStatus[status] ?? 0;
+                const isCreated = status === "CREATED";
+                const hasUnseen = isCreated && unseenCreatedCount > 0;
+                return (
                 <Pressable
                   key={status}
                   style={({ pressed }) => [styles.statusChip, orderStatus === status && styles.statusChipActive, pressed && styles.buttonPressed]}
-                  onPress={() => setOrderStatus(status)}
+                  onPress={() => {
+                    setOrderStatus(status);
+                    // Clear unseen badge when waiter explicitly opens CREATED tab
+                    if (isCreated) setUnseenCreatedCount(0);
+                  }}
                 >
                   <Text style={[styles.statusChipText, orderStatus === status && styles.statusChipTextActive]}>{ORDER_LABEL[status]}</Text>
+                  {hasUnseen ? (
+                    // Pulsing "Mới" indicator — highest priority
+                    <View style={[styles.statusChipBadge, styles.statusChipBadgeNew]}>
+                      <Text style={styles.statusChipBadgeText}>+{unseenCreatedCount > 99 ? "99+" : unseenCreatedCount} mới</Text>
+                    </View>
+                  ) : count > 0 ? (
+                    <View style={[styles.statusChipBadge, orderStatus === status && styles.statusChipBadgeActive]}>
+                      <Text style={[styles.statusChipBadgeText, orderStatus === status && styles.statusChipBadgeTextActive]}>{count > 99 ? "99+" : count}</Text>
+                    </View>
+                  ) : null}
                 </Pressable>
-              ))}
+              );})}
             </ScrollView>
             {activeTab === "orders" ? <Text style={styles.pollingText}>Tự động cập nhật mỗi 8 giây</Text> : null}
           </View>
@@ -725,9 +1065,9 @@ export default function WaiterMobileScreen() {
                         <View style={styles.tblCardBtns}>
                           <Pressable
                             style={({ pressed }) => [styles.tblBtnSecondary, pressed && styles.tblBtnPressed]}
-                            onPress={() => router.push({ pathname: "/tables/[tableCode]", params: { tableCode: table.tableCode } })}
+                            onPress={() => void handleOpenCreateOrder(table)}
                           >
-                            <Text style={styles.tblBtnSecondaryText}>Chi tiết</Text>
+                            <Text style={styles.tblBtnSecondaryText}>Tạo đơn</Text>
                           </Pressable>
                           <Pressable
                             style={({ pressed }) => [styles.tblBtnPrimary, { backgroundColor: color }, pressed && styles.tblBtnPressed]}
@@ -874,7 +1214,7 @@ export default function WaiterMobileScreen() {
                     {item.description ? <Text style={styles.mCardDesc} numberOfLines={1}>{item.description}</Text> : null}
                     <Text style={styles.mCardPrice}>{formatMoneyOrContact(item.price)}</Text>
                     {item.cookTime ? (
-                      <Text style={styles.mCardCookTime}>⏱ ~{Math.round(item.cookTime / 60)} phút</Text>
+                      <Text style={styles.mCardCookTime}>⏱ ~{item.cookTime} phút</Text>
                     ) : null}
                   </View>
                 </View>
@@ -968,7 +1308,7 @@ export default function WaiterMobileScreen() {
                           >
                             <View style={{ flex: 1, marginRight: 8 }}>
                               <Text style={[styles.detailText, isServed && styles.detailTextMuted]}>
-                                Món #{item.menuItemId}  ×{item.quantity}
+                                {(menuItems.find((m) => m.id === item.menuItemId)?.name ?? menuItemNames[item.menuItemId] ?? `Món #${item.menuItemId}`) + ` ×${item.quantity}`}
                                 {item.note ? `  · ${item.note}` : ""}
                               </Text>
                               <Text style={[
@@ -1016,7 +1356,11 @@ export default function WaiterMobileScreen() {
               <Pressable
                 key={tab.key}
                 style={({ pressed }) => [styles.bottomTabBtn, isActive && styles.bottomTabBtnActive, pressed && styles.buttonPressed]}
-                onPress={() => setActiveTab(tab.key)}
+                onPress={() => {
+                  setActiveTab(tab.key);
+                  // Clear unseen badge when waiter taps the orders tab
+                  if (tab.key === "orders") setUnseenCreatedCount(0);
+                }}
                 accessibilityRole="tab"
                 accessibilityState={{ selected: isActive }}
               >
@@ -1024,7 +1368,12 @@ export default function WaiterMobileScreen() {
                   <Ionicons name={iconName} size={22} color={iconColor} />
                   <View style={styles.bottomTabLabelRow}>
                     <Text style={[styles.bottomTabLabel, isActive && styles.bottomTabLabelActive]}>{tab.label}</Text>
-                    {tab.key === "orders" && pendingOrderCount > 0 ? (
+                    {tab.key === "orders" && unseenCreatedCount > 0 ? (
+                      // Hot-orange badge for truly new orders the waiter hasn't seen yet
+                      <View style={[styles.bottomTabBadge, { backgroundColor: "#F97316", borderColor: "#1C1C1E" }]}>
+                        <Text style={styles.bottomTabBadgeText}>{unseenCreatedCount > 99 ? "99+" : unseenCreatedCount}</Text>
+                      </View>
+                    ) : tab.key === "orders" && pendingOrderCount > 0 ? (
                       <View style={styles.bottomTabBadge}>
                         <Text style={styles.bottomTabBadgeText}>{pendingOrderCount > 99 ? "99+" : pendingOrderCount}</Text>
                       </View>
@@ -1041,6 +1390,155 @@ export default function WaiterMobileScreen() {
           })}
         </View>
       </View>
+
+      {/* ─── Create Order Modal ──────────────────────────────────────── */}
+      <Modal
+        visible={!!createOrderTable}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={handleCloseCreateOrder}
+      >
+        <SafeAreaView style={styles.coShell} edges={["top", "left", "right", "bottom"]}>
+          <View style={styles.coHeader}>
+            <Pressable
+              style={({ pressed }) => [styles.coCloseBtn, pressed && styles.buttonPressed]}
+              onPress={handleCloseCreateOrder}
+              disabled={submittingOrder}
+            >
+              <Text style={styles.coCloseBtnText}>← Hủy</Text>
+            </Pressable>
+            <View style={styles.flex1}>
+              <Text style={styles.coTitle}>Tạo đơn mới</Text>
+              <Text style={styles.coSubtitle}>Bàn {createOrderTable?.tableCode}</Text>
+            </View>
+          </View>
+
+          {categories.length > 0 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.mCatBar}
+              contentContainerStyle={styles.mCatRow}
+            >
+              <Pressable
+                style={[styles.mCatPill, createOrderCatFilter === "all" && styles.mCatPillActive]}
+                onPress={() => setCreateOrderCatFilter("all")}
+              >
+                <Text style={[styles.mCatPillText, createOrderCatFilter === "all" && styles.mCatPillTextActive]}>Tất cả</Text>
+              </Pressable>
+              {categories.map((cat) => (
+                <Pressable
+                  key={cat.id}
+                  style={[styles.mCatPill, createOrderCatFilter === cat.id && styles.mCatPillActive]}
+                  onPress={() => setCreateOrderCatFilter(cat.id)}
+                >
+                  <Text style={[styles.mCatPillText, createOrderCatFilter === cat.id && styles.mCatPillTextActive]}>{cat.name}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+
+          <ScrollView style={styles.flex1} contentContainerStyle={styles.coScrollContent}>
+            {loading && menuItems.length === 0 ? (
+              <ActivityIndicator style={styles.loader} color="#C9A227" />
+            ) : null}
+
+            <View style={styles.mGrid}>
+              {filteredCreateOrderItems.map((item) => {
+                const qty = createCart[item.id] ?? 0;
+                const isAvailable = item.available !== false;
+                return (
+                  <View key={item.id} style={styles.mCard}>
+                    <View style={styles.mCardImgWrap}>
+                      {item.imageUrl ? (
+                        <Image source={{ uri: item.imageUrl }} style={styles.mCardImg} resizeMode="cover" />
+                      ) : (
+                        <View style={styles.mCardImgFallback}>
+                          <Text style={styles.mCardImgEmoji}>🍽</Text>
+                        </View>
+                      )}
+                      {!isAvailable && (
+                        <View style={styles.mCardDimOverlay}>
+                          <Text style={styles.mCardDimText}>Tạm hết</Text>
+                        </View>
+                      )}
+                    </View>
+                    <View style={styles.mCardBody}>
+                      <Text style={styles.mCardName} numberOfLines={2}>{item.name}</Text>
+                      <Text style={styles.mCardPrice}>{formatMoneyOrContact(item.price)}</Text>
+                      {isAvailable ? (
+                        qty > 0 ? (
+                          <View style={styles.coQtyRow}>
+                            <Pressable
+                              onPress={() => handleRemoveFromCart(item.id)}
+                              style={({ pressed }) => [styles.coQtyBtn, pressed && styles.buttonPressed]}
+                            >
+                              <Text style={styles.coQtyBtnText}>−</Text>
+                            </Pressable>
+                            <Text style={styles.coQtyValue}>{qty}</Text>
+                            <Pressable
+                              onPress={() => handleAddToCart(item.id)}
+                              style={({ pressed }) => [styles.coQtyBtn, pressed && styles.buttonPressed]}
+                            >
+                              <Text style={styles.coQtyBtnText}>+</Text>
+                            </Pressable>
+                          </View>
+                        ) : (
+                          <Pressable
+                            onPress={() => handleAddToCart(item.id)}
+                            style={({ pressed }) => [styles.coAddBtn, pressed && styles.buttonPressed]}
+                          >
+                            <Text style={styles.coAddBtnText}>+ Thêm</Text>
+                          </Pressable>
+                        )
+                      ) : null}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+
+            {!loading && filteredCreateOrderItems.length === 0 && (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateIcon}>🍽️</Text>
+                <Text style={styles.emptyStateTitle}>Không có món trong danh mục này</Text>
+              </View>
+            )}
+          </ScrollView>
+
+          <View style={styles.coNoteWrap}>
+            <TextInput
+              style={styles.coNoteInput}
+              placeholder="Ghi chú đơn (ví dụ: ít cay, không hành...)"
+              placeholderTextColor="#9CA3AF"
+              value={createNote}
+              onChangeText={setCreateNote}
+              multiline
+              maxLength={200}
+            />
+          </View>
+
+          <View style={styles.coFooter}>
+            <View style={styles.flex1}>
+              <Text style={styles.coFooterMeta}>{cartStats.count} món · {cartStats.types} loại</Text>
+              <Text style={styles.coFooterTotal}>{formatMoney(cartStats.total)}</Text>
+            </View>
+            <Pressable
+              style={({ pressed }) => [
+                styles.coSubmitBtn,
+                (cartStats.count === 0 || submittingOrder) && styles.coSubmitBtnDisabled,
+                pressed && styles.buttonPressed,
+              ]}
+              onPress={() => void handleSubmitCreateOrder()}
+              disabled={cartStats.count === 0 || submittingOrder}
+            >
+              <Text style={styles.coSubmitBtnText}>
+                {submittingOrder ? "Đang tạo..." : "Tạo đơn"}
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1120,6 +1618,15 @@ const styles = StyleSheet.create({
   },
   posTitle: { fontSize: 17, fontWeight: "700", color: "#1C1C1E" },
   posSubtitle: { marginTop: 3, fontSize: 13, fontWeight: "500", color: "#636366" },
+  soundToggleBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#F3F4F6",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 8,
+  },
   headerLogoutBtn: {
     borderWidth: 1.5,
     borderColor: "#E0D5C0",
@@ -1168,6 +1675,9 @@ const styles = StyleSheet.create({
   statusWrap: { marginBottom: 8, paddingHorizontal: 14, marginTop: 8 },
   statusScroller: { maxHeight: 44 },
   statusChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: "#E0D5C0",
@@ -1179,6 +1689,42 @@ const styles = StyleSheet.create({
   statusChipActive: { backgroundColor: "#1C1C1E", borderColor: "#1C1C1E" },
   statusChipText: { color: "#48484A", fontWeight: "600", fontSize: 13 },
   statusChipTextActive: { color: "#FFFFFF" },
+  statusChipBadge: {
+    minWidth: 20,
+    height: 20,
+    paddingHorizontal: 5,
+    borderRadius: 10,
+    backgroundColor: "#EF4444",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  statusChipBadgeActive: {
+    backgroundColor: "#C9A227",
+  },
+  /** Hot-orange badge shown when there are unseen NEW orders — high-attention color */
+  statusChipBadgeNew: {
+    backgroundColor: "#F97316",
+    minWidth: 20,
+    height: 20,
+    paddingHorizontal: 6,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    // Shadow to make it pop on the chip
+    shadowColor: "#F97316",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.55,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  statusChipBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  statusChipBadgeTextActive: {
+    color: "#1C1C1E",
+  },
   pollingText: { marginHorizontal: 18, marginTop: 4, marginBottom: 2, color: "#636366", fontSize: 13 },
   loader: { marginBottom: 8 },
   scrollContent: { paddingHorizontal: 14, paddingTop: 10 },
@@ -1479,6 +2025,107 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   serveButtonText: { color: "#FFFFFF", fontWeight: "700", fontSize: 11 },
+
+  // ── Create-order modal ────────────────────────────────────────────────────────
+  coShell: { flex: 1, backgroundColor: "#FAF8F0" },
+  coHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: "#FFFFFF",
+    borderBottomWidth: 1,
+    borderBottomColor: "#E0D5C0",
+  },
+  coCloseBtn: {
+    borderWidth: 1.5,
+    borderColor: "#E0D5C0",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#FAFAFA",
+  },
+  coCloseBtnText: { color: "#48484A", fontWeight: "600", fontSize: 13 },
+  coTitle: { fontSize: 17, fontWeight: "700", color: "#1C1C1E" },
+  coSubtitle: { marginTop: 2, fontSize: 13, fontWeight: "500", color: "#636366" },
+  coScrollContent: { padding: 14, paddingBottom: 20 },
+  coQtyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 6,
+    backgroundColor: "#F5E6A3",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#C9A227",
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  coQtyBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: "#C9A227",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  coQtyBtnText: { color: "#1A1208", fontSize: 16, fontWeight: "800", lineHeight: 18 },
+  coQtyValue: { color: "#1A1208", fontSize: 14, fontWeight: "800" },
+  coAddBtn: {
+    marginTop: 6,
+    borderRadius: 10,
+    backgroundColor: "#1C1C1E",
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  coAddBtnText: { color: "#FFFFFF", fontSize: 13, fontWeight: "700" },
+  coNoteWrap: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: "#FFFFFF",
+    borderTopWidth: 1,
+    borderTopColor: "#E0D5C0",
+  },
+  coNoteInput: {
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    borderRadius: 10,
+    backgroundColor: "#F9FAFB",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 13,
+    color: "#111827",
+    minHeight: 36,
+    maxHeight: 80,
+  },
+  coFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: "#FFFFFF",
+    borderTopWidth: 1,
+    borderTopColor: "#E0D5C0",
+  },
+  coFooterMeta: { fontSize: 12, color: "#636366", fontWeight: "500" },
+  coFooterTotal: { fontSize: 18, fontWeight: "800", color: "#C9A227", marginTop: 2 },
+  coSubmitBtn: {
+    backgroundColor: "#16A34A",
+    borderRadius: 12,
+    paddingHorizontal: 22,
+    paddingVertical: 12,
+    minWidth: 120,
+    alignItems: "center",
+    shadowColor: "#16A34A",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  coSubmitBtnDisabled: { backgroundColor: "#9CA3AF", shadowOpacity: 0, elevation: 0 },
+  coSubmitBtnText: { color: "#FFFFFF", fontSize: 14, fontWeight: "800" },
 
   // ── Detail box rows ───────────────────────────────────────────────────────────
   detailRow: {

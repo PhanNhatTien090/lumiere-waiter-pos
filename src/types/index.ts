@@ -105,6 +105,20 @@ export interface CancelOrderRequest {
   reason: string;
 }
 
+export interface CreateOrderItemRequest {
+  menuItemId: number;
+  quantity: number;
+  note?: string | null;
+  comboSelection?: unknown | null;
+}
+
+export interface CreateOrderRequest {
+  tableCode: string;
+  note?: string | null;
+  splitBillAllowed?: boolean;
+  items: CreateOrderItemRequest[];
+}
+
 export type PaymentMethod = "CASH" | "QR_CODE";
 export type PaymentProvider = "CASH" | "VIETQR" | "VNPAY";
 

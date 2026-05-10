@@ -13,6 +13,9 @@
  *     Fires when kitchen marks a single task DONE. Use to update item status granularly
  *     without waiting for the whole order to become READY.
  *
+ *   /topic/waiter/payment-success  → WaiterPaymentSuccessPayload
+ *     Fires when a payment is completed. Used for sound alert + table status update.
+ *
  * All callbacks are stored in stable refs — the effect never re-subscribes due to
  * parent re-renders with new callback references.
  */
@@ -20,7 +23,7 @@
 import { useEffect, useRef } from 'react';
 import type { Client } from '@stomp/stompjs';
 import { createWaiterStompClient } from '../lib/websocket';
-import type { OrderResponse } from '../types';
+import type { OrderResponse, SupportRequestResponse } from '../types';
 
 // ── Payload types ──────────────────────────────────────────────────────────────
 
@@ -41,6 +44,16 @@ export interface WaiterItemDonePayload {
   status: 'DONE';
 }
 
+/** Payload sent when a payment is completed successfully */
+export interface WaiterPaymentSuccessPayload {
+  orderId: number;
+  tableId: number;
+  status: string;
+  paidAt: string;
+  paymentId: number;
+  amount: number;
+}
+
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
 interface UseWaiterSocketOptions {
@@ -52,6 +65,10 @@ interface UseWaiterSocketOptions {
   onNewOrder?: (payload: OrderResponse) => void;
   /** Kitchen marked one task DONE — update item status granularly */
   onItemDone?: (payload: WaiterItemDonePayload) => void;
+  /** Customer created a new support request */
+  onNewSupportRequest?: (payload: SupportRequestResponse) => void;
+  /** Payment completed successfully — play sound + update table status */
+  onPaymentSuccess?: (payload: WaiterPaymentSuccessPayload) => void;
   /** Called when socket connection state changes */
   onConnectionChange?: (connected: boolean) => void;
 }
@@ -61,19 +78,25 @@ export function useWaiterSocket({
   onOrderReady,
   onNewOrder,
   onItemDone,
+  onNewSupportRequest,
+  onPaymentSuccess,
   onConnectionChange,
 }: UseWaiterSocketOptions) {
   const clientRef = useRef<Client | null>(null);
 
   // Stable refs — callbacks update without causing re-subscription
-  const onOrderReadyRef      = useRef(onOrderReady);
-  const onNewOrderRef        = useRef(onNewOrder);
-  const onItemDoneRef        = useRef(onItemDone);
-  const onConnectionChangeRef = useRef(onConnectionChange);
-  onOrderReadyRef.current       = onOrderReady;
-  onNewOrderRef.current         = onNewOrder;
-  onItemDoneRef.current         = onItemDone;
-  onConnectionChangeRef.current = onConnectionChange;
+  const onOrderReadyRef          = useRef(onOrderReady);
+  const onNewOrderRef            = useRef(onNewOrder);
+  const onItemDoneRef            = useRef(onItemDone);
+  const onNewSupportRequestRef   = useRef(onNewSupportRequest);
+  const onPaymentSuccessRef      = useRef(onPaymentSuccess);
+  const onConnectionChangeRef    = useRef(onConnectionChange);
+  onOrderReadyRef.current          = onOrderReady;
+  onNewOrderRef.current            = onNewOrder;
+  onItemDoneRef.current            = onItemDone;
+  onNewSupportRequestRef.current   = onNewSupportRequest;
+  onPaymentSuccessRef.current      = onPaymentSuccess;
+  onConnectionChangeRef.current    = onConnectionChange;
 
   useEffect(() => {
     if (!enabled) return;
@@ -116,6 +139,28 @@ export function useWaiterSocket({
           console.error('[STOMP] Failed to parse /topic/waiter/item-done', e);
         }
       });
+
+      // ── /topic/waiter/support-request ────────────────────────────────────
+      // Customer created a new support request via QR → notify waiter immediately
+      client.subscribe('/topic/waiter/support-request', (message) => {
+        try {
+          const payload: SupportRequestResponse = JSON.parse(message.body);
+          onNewSupportRequestRef.current?.(payload);
+        } catch (e) {
+          console.error('[STOMP] Failed to parse /topic/waiter/support-request', e);
+        }
+      });
+
+      // ── /topic/waiter/payment-success ────────────────────────────────────
+      // Payment completed → play sound + update table status to CLEANING
+      client.subscribe('/topic/waiter/payment-success', (message) => {
+        try {
+          const payload: WaiterPaymentSuccessPayload = JSON.parse(message.body);
+          onPaymentSuccessRef.current?.(payload);
+        } catch (e) {
+          console.error('[STOMP] Failed to parse /topic/waiter/payment-success', e);
+        }
+      });
     };
 
     client.onDisconnect = () => {
@@ -136,3 +181,4 @@ export function useWaiterSocket({
 
   return clientRef;
 }
+
