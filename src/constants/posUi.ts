@@ -29,15 +29,15 @@ export const TABLE_LABEL: Record<TableStatus, string> = {
   AVAILABLE: "Trống",
   OCCUPIED: "Đang dùng",
   RESERVED: "Đặt trước",
-  CLEANING: "Chờ dọn · thanh toán",
+  CLEANING: "Chờ dọn",
 };
 
 /** LUMIÈRE UX palette — TABLE STATUS (fine dining POS) */
 export const TABLE_COLOR: Record<TableStatus, string> = {
-  AVAILABLE: "#16A34A",
-  RESERVED: "#CA8A04",
-  OCCUPIED: "#2563EB",
-  CLEANING: "#EA580C",
+  AVAILABLE: "#2E7D32",
+  RESERVED: "#C77700",
+  OCCUPIED: "#D97706",
+  CLEANING: "#C2410C",
 };
 
 export function formatMoney(value: number) {

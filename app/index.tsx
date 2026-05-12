@@ -945,8 +945,6 @@ export default function WaiterMobileScreen() {
           </Pressable>
         </View>
 
-        {activeTab === "support" ? <Text style={styles.pollingText}>Tự làm mới mỗi 12 giây · Theo thời gian tạo giảm dần</Text> : null}
-
         {(activeTab === "orders" || activeTab === "payments") && (
           <View style={styles.statusWrap}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.statusScroller}>
@@ -978,7 +976,6 @@ export default function WaiterMobileScreen() {
                 </Pressable>
               );})}
             </ScrollView>
-            {activeTab === "orders" ? <Text style={styles.pollingText}>Tự động cập nhật mỗi 8 giây</Text> : null}
           </View>
         )}
 
@@ -1012,6 +1009,24 @@ export default function WaiterMobileScreen() {
         >
           {activeTab === "tables" && (
             <View>
+              {/* Summary row - TOP */}
+              {filteredTables.length > 0 && (
+                <View style={styles.tblSummaryRow}>
+                  <View style={styles.tblSummaryCol}>
+                    <Text style={styles.tblSummaryValue}>{filteredTables.filter(t => t.status === "OCCUPIED").length}</Text>
+                    <Text style={styles.tblSummaryLabel}>Đang dùng</Text>
+                  </View>
+                  <View style={styles.tblSummaryCol}>
+                    <Text style={styles.tblSummaryValue}>{filteredTables.filter(t => t.status === "AVAILABLE").length}</Text>
+                    <Text style={styles.tblSummaryLabel}>Trống</Text>
+                  </View>
+                  <View style={styles.tblSummaryCol}>
+                    <Text style={styles.tblSummaryValue}>{filteredTables.reduce((sum, t) => sum + t.capacity, 0)}</Text>
+                    <Text style={styles.tblSummaryLabel}>Sức chứa</Text>
+                  </View>
+                </View>
+              )}
+
               {/* Search */}
               <TextInput
                 style={styles.tblSearch}
@@ -1044,6 +1059,8 @@ export default function WaiterMobileScreen() {
                 {filteredTables.map((table) => {
                   const color = TABLE_COLOR[table.status];
                   const nextStatus = nextTableStatus(table.status);
+                  const sittingMinutes = table.status === "OCCUPIED" && table.updatedAt ? Math.floor((Date.now() - new Date(table.updatedAt).getTime()) / 60000) : 0;
+                  const timeLabel = table.status === "OCCUPIED" && sittingMinutes > 0 ? `  ·  ${sittingMinutes} phút` : "";
                   return (
                     <View key={table.id} style={styles.tblCard}>
                       {/* Top color bar */}
@@ -1059,7 +1076,7 @@ export default function WaiterMobileScreen() {
                         </View>
 
                         {/* Row 2: meta */}
-                        <Text style={styles.tblCardMeta}>Tầng {table.floor}  ·  {table.capacity} chỗ</Text>
+                        <Text style={styles.tblCardMeta}>Tầng {table.floor}  ·  {table.capacity} chỗ{timeLabel}</Text>
 
                         {/* Row 3: buttons */}
                         <View style={styles.tblCardBtns}>
@@ -1104,19 +1121,14 @@ export default function WaiterMobileScreen() {
                 const ticketBg = SUPPORT_STATUS_BG[req.status];
 
                 return (
-                  <View key={req.id} style={[styles.supportTicket, { backgroundColor: ticketBg, borderColor: statusColor + "44" }]}>
-                    {/* Left accent bar */}
-                    <View style={[styles.supportTicketAccent, { backgroundColor: statusColor }]} />
-
+                  <View key={req.id} style={[styles.supportTicket, { backgroundColor: req.status === "CREATED" ? "#FEF2F2" : ticketBg }]}>
                     <View style={styles.supportTicketBody}>
-                      {/* Header: title + status badge */}
+                      {/* Header: table code + new badge */}
                       <View style={styles.supportTicketHeader}>
-                        <Text style={styles.supportTicketTitle}>
-                          🔔 Bàn {req.tableCode}  ·  #{req.id}
+                        <Text style={[styles.supportTicketTitle, req.status === "CREATED" && { color: "#DC2626" }]}>
+                          Bàn {req.tableCode}  #{req.id}
                         </Text>
-                        <View style={[styles.supportStatusBadge, { backgroundColor: statusColor }]}>
-                          <Text style={styles.supportStatusBadgeText}>{SUPPORT_LABEL[req.status]}</Text>
-                        </View>
+                        {req.status === "CREATED" && <View style={styles.supportNewBadge}><Text style={styles.supportNewBadgeText}>Mới</Text></View>}
                       </View>
 
                       {/* Message */}
@@ -1124,49 +1136,44 @@ export default function WaiterMobileScreen() {
                         <Text style={styles.supportTicketMsg}>"{req.message}"</Text>
                       ) : null}
 
-                      {/* Meta: time + assignee */}
+                      {/* Time + Status badge */}
                       <View style={styles.rowBetween}>
-                        <Text style={styles.supportTicketMeta}>🕐 {timeAgo(req.createdAt)}</Text>
-                        <Text style={styles.supportTicketMeta}>
-                          {req.staffId ? `👤 NV #${req.staffId}${isMine ? " (bạn)" : ""}` : "👤 Chưa giao"}
-                        </Text>
+                        <Text style={styles.supportTicketMeta}>{timeAgo(req.createdAt)}</Text>
+                        <View style={[styles.supportStatusBadge, { backgroundColor: statusColor }]}>
+                          <Text style={styles.supportStatusBadgeText}>{SUPPORT_LABEL[req.status]}</Text>
+                        </View>
                       </View>
 
-                      {/* Actions */}
-                      <View style={styles.actionRow}>
-                        {(req.status === "CREATED" || (req.status === "ASSIGNED" && req.staffId == null)) && (
-                          <Pressable
-                            style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
-                            onPress={() => void handleSupportAssignToMe(req)}
-                          >
-                            <Text style={styles.smallButtonText}>Gán cho tôi</Text>
-                          </Pressable>
-                        )}
-                        {req.status === "ASSIGNED" && isMine ? (
-                          <Pressable
-                            style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
-                            onPress={() => void handleSupportUpdateStatus(req, "IN_PROGRESS")}
-                          >
-                            <Text style={styles.smallButtonText}>Bắt đầu xử lý</Text>
-                          </Pressable>
-                        ) : null}
-                        {req.status === "IN_PROGRESS" && isMine ? (
-                          <Pressable
-                            style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
-                            onPress={() => void handleSupportUpdateStatus(req, "RESOLVED")}
-                          >
-                            <Text style={styles.smallButtonText}>Đã giải quyết</Text>
-                          </Pressable>
-                        ) : null}
-                        {req.status === "RESOLVED" && (role === "WAITER" || role === "MANAGER") ? (
-                          <Pressable
-                            style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
-                            onPress={() => void handleSupportUpdateStatus(req, "CLOSED")}
-                          >
-                            <Text style={styles.smallButtonText}>Đóng yêu cầu</Text>
-                          </Pressable>
-                        ) : null}
-                      </View>
+                      {/* Single action button based on status */}
+                      {req.status === "CREATED" ? (
+                        <Pressable
+                          style={({ pressed }) => [styles.supportAssignBtn, pressed && styles.buttonPressed]}
+                          onPress={() => void handleSupportAssignToMe(req)}
+                        >
+                          <Text style={styles.supportAssignBtnText}>Gán cho tôi</Text>
+                        </Pressable>
+                      ) : req.status === "ASSIGNED" && isMine ? (
+                        <Pressable
+                          style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
+                          onPress={() => void handleSupportUpdateStatus(req, "IN_PROGRESS")}
+                        >
+                          <Text style={styles.smallButtonText}>Bắt đầu</Text>
+                        </Pressable>
+                      ) : req.status === "IN_PROGRESS" && isMine ? (
+                        <Pressable
+                          style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
+                          onPress={() => void handleSupportUpdateStatus(req, "RESOLVED")}
+                        >
+                          <Text style={styles.smallButtonText}>Xong</Text>
+                        </Pressable>
+                      ) : req.status === "RESOLVED" && (role === "WAITER" || role === "MANAGER") ? (
+                        <Pressable
+                          style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]}
+                          onPress={() => void handleSupportUpdateStatus(req, "CLOSED")}
+                        >
+                          <Text style={styles.smallButtonText}>Đóng</Text>
+                        </Pressable>
+                      ) : null}
                     </View>
                   </View>
                 );
@@ -1189,7 +1196,7 @@ export default function WaiterMobileScreen() {
                 return (
                 <View key={item.id} style={styles.mCard}>
                   {/* Image */}
-                  <View style={styles.mCardImgWrap}>
+                  <View style={[styles.mCardImgWrap, { backgroundColor: "#2C3E50" }]}>
                     {item.imageUrl ? (
                       <Image source={{ uri: item.imageUrl }} style={styles.mCardImg} resizeMode="cover" />
                     ) : (
@@ -1203,19 +1210,19 @@ export default function WaiterMobileScreen() {
                       </View>
                     )}
                     {isAvailable && (
-                      <Pressable style={({ pressed }) => [styles.mCardAddBtn, pressed && { opacity: 0.8, transform: [{ scale: 0.92 }] }]}>
+                      <Pressable style={({ pressed }) => [styles.mCardAddBtnNew, pressed && { opacity: 0.85, transform: [{ scale: 0.95 }] }]}>
                         <Text style={styles.mCardAddBtnText}>+</Text>
                       </Pressable>
+                    )}
+                    {item.cookTime && (
+                      <Text style={styles.mCardCookTimeOverlay}>⏱ {item.cookTime}m</Text>
                     )}
                   </View>
                   {/* Body */}
                   <View style={styles.mCardBody}>
                     <Text style={styles.mCardName} numberOfLines={2}>{item.name}</Text>
                     {item.description ? <Text style={styles.mCardDesc} numberOfLines={1}>{item.description}</Text> : null}
-                    <Text style={styles.mCardPrice}>{formatMoneyOrContact(item.price)}</Text>
-                    {item.cookTime ? (
-                      <Text style={styles.mCardCookTime}>⏱ ~{item.cookTime} phút</Text>
-                    ) : null}
+                    <Text style={styles.mCardPriceYellow}>{formatMoneyOrContact(item.price)}</Text>
                   </View>
                 </View>
               );})}
@@ -1233,21 +1240,56 @@ export default function WaiterMobileScreen() {
               {orders.map((order) => {
                 const readyItemCount = order.items.filter((i) => i.status === "READY").length;
                 const canServeAll = (role === "WAITER" || role === "MANAGER") && order.status === "READY";
+                const table = tables.find(t => t.id === order.tableId);
+                const orderStatusColor =
+                  order.status === "CREATED" ? "#1F5FBF" :
+                  order.status === "CONFIRMED" ? "#1E8C5A" :
+                  order.status === "PREPARING" ? "#D97706" :
+                  order.status === "READY" ? "#059669" :
+                  order.status === "SERVED" ? "#6B7280" :
+                  order.status === "PAID" ? "#0D9488" :
+                  order.status === "CANCELLED" ? "#DC2626" : "#6B7280";
                 return (
                 <View key={order.id} style={styles.card}>
+                  {/* Table name - PROMINENT */}
+                  {table && <Text style={styles.cardTableNameLarge}>Bàn {table.tableCode}</Text>}
+                  
                   <View style={styles.rowBetween}>
-                    <Text style={styles.cardTitle}>Order #{order.id}</Text>
-                    <Text style={styles.price}>{formatMoneyOrContact(order.totalAmount)}</Text>
+                    <Text style={styles.cardOrderId}>Order #{order.id}  ·  {order.items.length} món</Text>
+                    <Text style={styles.priceSmall}>{formatMoneyOrContact(order.totalAmount)}</Text>
                   </View>
+                  
                   <View style={styles.rowBetween}>
-                    <Text style={styles.cardSub}>Trạng thái: {ORDER_LABEL[order.status]}</Text>
+                    <View style={[styles.orderStatusBadge, { backgroundColor: orderStatusColor }]}>
+                      <Text style={styles.orderStatusText}>{ORDER_LABEL[order.status]}</Text>
+                    </View>
                     {readyItemCount > 0 && (
                       <View style={styles.readyBadge}>
-                        <Text style={styles.readyBadgeText}>🍽 {readyItemCount} món sẵn sàng</Text>
+                        <Text style={styles.readyBadgeText}>🍽 {readyItemCount} món</Text>
                       </View>
                     )}
                   </View>
-                  <Text style={styles.cardSub}>Số món: {order.items.length}</Text>
+
+                  {/* Items preview */}
+                  <View style={styles.orderItemsPreview}>
+                    {order.items.slice(0, 3).map((item) => {
+                      const isReady = item.status === "READY";
+                      const menuItem = menuItems.find((m) => m.id === item.menuItemId) || { name: `Món #${item.menuItemId}` };
+                      return (
+                        <View key={item.id} style={[styles.itemPreviewRow, isReady && styles.itemPreviewRowReady]}>
+                          <Text style={styles.itemPreviewName} numberOfLines={1}>
+                            {menuItem.name} ×{item.quantity}
+                          </Text>
+                          <Text style={[styles.itemPreviewStatus, isReady && styles.itemPreviewStatusReady]}>
+                            {ORDER_ITEM_LABEL[item.status] ?? item.status}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                    {order.items.length > 3 && (
+                      <Text style={styles.itemPreviewMore}>+{order.items.length - 3} món khác</Text>
+                    )}
+                  </View>
 
                   <View style={styles.actionRow}>
                     <Pressable style={({ pressed }) => [styles.smallButton, pressed && styles.buttonPressed]} onPress={() => void handleOrderDetail(order)}>
@@ -1813,7 +1855,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.04,
     shadowRadius: 3,
     elevation: 1,
-  },
+    },
   tblFilterRow: { flexDirection: "row", gap: 6, paddingBottom: 12 },
   tblPill: {
     flexDirection: "row",
@@ -1831,17 +1873,17 @@ const styles = StyleSheet.create({
   tblPillText: { fontSize: 12, fontWeight: "600", color: "#6B7280" },
   tblPillTextActive: { color: "#FFFFFF" },
 
-  tblGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  tblGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between" },
   tblCard: {
     width: "48%",
-    borderRadius: 14,
+    borderRadius: 12,
     backgroundColor: "#FFFFFF",
     overflow: "hidden",
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 2,
   },
   tblCardBar: { height: 4, width: "100%" },
   tblCardBody: { padding: 12, gap: 8 },
@@ -1862,17 +1904,19 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: "#E5E7EB",
     backgroundColor: "#F9FAFB",
-    paddingVertical: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
     alignItems: "center",
   },
-  tblBtnSecondaryText: { fontSize: 12, fontWeight: "600", color: "#374151" },
+  tblBtnSecondaryText: { fontSize: 11, fontWeight: "600", color: "#374151" },
   tblBtnPrimary: {
     flex: 1,
     borderRadius: 8,
-    paddingVertical: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
     alignItems: "center",
   },
-  tblBtnPrimaryText: { fontSize: 12, fontWeight: "700", color: "#FFFFFF" },
+  tblBtnPrimaryText: { fontSize: 11, fontWeight: "700", color: "#FFFFFF" },
   tblBtnPressed: { opacity: 0.82, transform: [{ scale: 0.97 }] },
 
   // ── Menu 2-column grid (keep tableGrid alias) ─────────────────────────────────
@@ -1898,17 +1942,17 @@ const styles = StyleSheet.create({
   mCatPillText: { fontSize: 12, fontWeight: "600", color: "#6B7280" },
   mCatPillTextActive: { color: "#FFFFFF" },
 
-  mGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  mGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between" },
   mCard: {
     width: "48%",
-    borderRadius: 14,
+    borderRadius: 12,
     backgroundColor: "#FFFFFF",
     overflow: "hidden",
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.09,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 2,
   },
   mCardImgWrap: { width: "100%", aspectRatio: 4 / 3, backgroundColor: "#F3F4F6" },
   mCardImg: { width: "100%", height: "100%" },
@@ -1947,26 +1991,28 @@ const styles = StyleSheet.create({
 
   // ── Support ticket cards ──────────────────────────────────────────────────────
   supportTicket: {
-    borderRadius: 12,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#E8E0D0",
+    borderColor: "#E8EDF3",
     backgroundColor: "#FFFFFF",
+    borderLeftWidth: 3,
+    borderLeftColor: "#D94040",
     overflow: "hidden",
-    flexDirection: "row",
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
   },
-  supportTicketAccent: { width: 4 },
-  supportTicketBody: { flex: 1, paddingHorizontal: 12, paddingVertical: 10, gap: 6 },
+  supportTicketBody: { gap: 6 },
   supportTicketHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 },
-  supportTicketTitle: { fontSize: 14, fontWeight: "700", color: "#1F2937", flex: 1 },
-  supportStatusBadge: { borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 },
+  supportTicketTitle: { fontSize: 14, fontWeight: "700", color: "#1F2937" },
+  supportStatusBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
   supportStatusBadgeText: { fontSize: 10, fontWeight: "700", color: "#FFFFFF" },
-  supportTicketMsg: { fontSize: 13, color: "#4B5563", fontStyle: "italic" },
-  supportTicketMeta: { fontSize: 12, color: "#9CA3AF" },
+  supportTicketMsg: { fontSize: 13, color: "#4B5563", fontStyle: "italic", marginTop: 2 },
+  supportTicketMeta: { fontSize: 12, color: "#9CA3AF", fontWeight: "500" },
 
   // ── Confirm (green primary) button ────────────────────────────────────────────
   confirmButton: {
@@ -2142,4 +2188,99 @@ const styles = StyleSheet.create({
   detailStatusReady: { color: "#16A34A" },
   detailStatusServed: { color: "#9CA3AF" },
   detailTextMuted: { color: "#D1D5DB" },
+
+  // ── New table summary row ─────────────────────────────────────────────────────
+  tblSummaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    marginTop: 16,
+    marginHorizontal: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: "#F0F4F8",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#D7E0E8",
+  },
+  tblSummaryCol: { alignItems: "center", gap: 4 },
+  tblSummaryValue: { fontSize: 18, fontWeight: "800", color: "#1F5FBF" },
+  tblSummaryLabel: { fontSize: 11, color: "#64748B", fontWeight: "600" },
+
+  // ── Order card improvements ───────────────────────────────────────────────────
+  cardTableNameLarge: { fontSize: 16, fontWeight: "800", color: "#1F5FBF", marginBottom: 6 },
+  cardOrderId: { fontSize: 12, color: "#64748B", fontWeight: "500" },
+  priceSmall: { fontSize: 15, fontWeight: "700", color: "#B8922A" },
+  orderStatusBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
+  orderStatusText: { fontSize: 11, fontWeight: "700", color: "#FFFFFF" },
+  
+  // ── Order items preview ───────────────────────────────────────────────────
+  orderItemsPreview: { 
+    marginTop: 8, 
+    paddingVertical: 6, 
+    borderTopWidth: 1, 
+    borderTopColor: "#E5EAF1",
+    gap: 4,
+  },
+  itemPreviewRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 3,
+  },
+  itemPreviewRowReady: { backgroundColor: "#F0FDF4", paddingHorizontal: 6, borderRadius: 4 },
+  itemPreviewName: { fontSize: 12, color: "#374151", fontWeight: "500" },
+  itemPreviewStatus: { fontSize: 10, color: "#9CA3AF" },
+  itemPreviewStatusReady: { color: "#16A34A", fontWeight: "600" },
+  itemPreviewMore: { fontSize: 11, color: "#D1D5DB", fontStyle: "italic", paddingTop: 2 },
+
+  // ── Menu card improvements ────────────────────────────────────────────────────
+  mCardAddBtnNew: {
+    position: "absolute",
+    bottom: 10,
+    right: 10,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#D97706",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#D97706",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 5,
+  },
+  mCardCookTimeOverlay: {
+    position: "absolute",
+    bottom: 8,
+    left: 8,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    color: "#FFFFFF",
+    fontSize: 9,
+    fontWeight: "700",
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  mCardPriceYellow: { fontSize: 15, fontWeight: "800", color: "#D97706", marginTop: 4 },
+
+  // ── Support card improvements ─────────────────────────────────────────────────
+  supportNewBadge: {
+    backgroundColor: "#DC2626",
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  supportNewBadgeText: { fontSize: 9, fontWeight: "800", color: "#FFFFFF", letterSpacing: 0.3 },
+  supportAssignBtn: {
+    borderRadius: 8,
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "#D4C4A8",
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    alignItems: "center",
+    alignSelf: "flex-end",
+    marginTop: 4,
+  },
+  supportAssignBtnText: { color: "#B8922A", fontWeight: "700", fontSize: 12 },
 });

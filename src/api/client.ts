@@ -1,7 +1,7 @@
 import axios, { AxiosInstance, InternalAxiosRequestConfig } from "axios";
 import { useWaiterStore } from "../store/waiterStore";
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || "https://lumiere-restaurant-backend.onrender.com";
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || "https://lumiere-restaurant-backend.onrender.com/api/v1";
 const IDEMPOTENCY_KEY_HEADER = "X-Idempotency-Key";
 
 function createIdempotencyKey() {
