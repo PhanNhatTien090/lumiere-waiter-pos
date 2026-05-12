@@ -1,4 +1,4 @@
-import { OrderItemStatus, OrderStatus, StaffRole, TableStatus } from "../types";
+import { OrderItemStatus, OrderStatus, StaffRole, TableStatus, TaxMode } from "../types";
 
 export const ORDER_STATUS_BY_ROLE: Record<StaffRole, OrderStatus[]> = {
   WAITER:  ["CREATED", "CONFIRMED", "PREPARING", "READY"],
@@ -55,6 +55,15 @@ export function formatMoneyOrContact(value: number | string | null | undefined):
   if (!Number.isFinite(n)) return "Liên hệ";
   return formatMoney(n);
 }
+
+/** Converts basis points to percent. E.g. 800 bps → 8. */
+export const bpsToPercent = (bps: number): number => (bps ?? 0) / 100;
+
+/** Formats basis points as a percent string. E.g. 800 → "8%". */
+export const formatTaxRate = (bps: number): string => `${bpsToPercent(bps)}%`;
+
+/** Returns true if the tax mode applies any tax. */
+export const isTaxApplied = (mode: TaxMode): boolean => mode !== "NO_TAX";
 
 export function nextTableStatus(status: TableStatus): TableStatus {
   if (status === "AVAILABLE") return "RESERVED";

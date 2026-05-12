@@ -1,3 +1,5 @@
+export type TaxMode = "NO_TAX" | "EXCLUSIVE" | "INCLUSIVE";
+
 export interface ApiResponse<T> {
   success: boolean;
   message: string;
@@ -77,6 +79,10 @@ export interface OrderItemResponse {
   quantity: number;
   unitPrice: number;
   subtotal: number;
+  unitTaxMode?: TaxMode;
+  unitTaxRateBps?: number;
+  netSubtotal?: number;
+  taxSubtotal?: number;
   note?: string | null;
   status: OrderItemStatus;
   createdAt: string;
@@ -88,7 +94,13 @@ export interface OrderResponse {
   id: number;
   tableId: number;
   status: OrderStatus;
+  subtotalAmount: number;
+  taxAmount: number;
   totalAmount: number;
+  taxMode: TaxMode;
+  taxRateBps: number;
+  taxSnapshotAt?: string | null;
+  taxSnapshotById?: number | null;
   note?: string | null;
   splitBillAllowed: boolean;
   createdAt: string;
@@ -134,7 +146,12 @@ export interface CreatePaymentRequest {
 export interface PaymentResponse {
   paymentId: number;
   orderId: number;
+  shiftId: number;
+  subtotalAmount: number;
+  taxAmount: number;
   amount: number;
+  taxMode: TaxMode;
+  taxRateBps: number;
   paymentMethod: PaymentMethod;
   provider: PaymentProvider;
   status: string;

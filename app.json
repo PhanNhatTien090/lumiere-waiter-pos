@@ -1,5 +1,8 @@
 {
   "expo": {
+    "cli": {
+      "appVersionSource": "remote"
+    },
     "name": "Lumière Waiter",
     "slug": "waiter-app",
     "version": "1.0.0",
@@ -27,6 +30,12 @@
     "plugins": [
       "expo-router"
     ],
-    "scheme": "lumiere-waiter"
+    "scheme": "lumiere-waiter",
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "ada56bfb-ed14-458b-b09c-11a00b4b6a87"
+      }
+    }
   }
 }
