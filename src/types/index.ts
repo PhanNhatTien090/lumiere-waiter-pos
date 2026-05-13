@@ -69,7 +69,7 @@ export interface MenuItemResponse {
 
 export type OrderStatus = "CREATED" | "CONFIRMED" | "PREPARING" | "READY" | "SERVED" | "PAID" | "CANCELLED";
 
-export type OrderItemStatus = "PENDING" | "CONFIRMED" | "PREPARING" | "READY" | "SERVED" | "CANCELLED";
+export type OrderItemStatus = "PENDING" | "PREPARING" | "DONE" | "SERVED" | "CANCELLED";
 
 export interface OrderItemResponse {
   id: number;

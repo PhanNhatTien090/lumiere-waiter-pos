@@ -477,7 +477,7 @@ export default function WaiterMobileScreen() {
     () => orders.filter((o) =>
       o.status === "CREATED" ||
       o.status === "CONFIRMED" ||
-      o.items.some((i) => i.status === "READY")   // any item ready to serve
+      o.items.some((i) => i.status === "DONE")   // any item done from kitchen, ready to serve
     ).length,
     [orders]
   );
@@ -1238,8 +1238,10 @@ export default function WaiterMobileScreen() {
           {(activeTab === "orders" || activeTab === "payments") && (
             <View style={styles.list}>
               {orders.map((order) => {
-                const readyItemCount = order.items.filter((i) => i.status === "READY").length;
-                const canServeAll = (role === "WAITER" || role === "MANAGER") && order.status === "READY";
+                const doneItemCount = order.items.filter((i) => i.status === "DONE").length;
+                const canServeAll = (role === "WAITER" || role === "MANAGER")
+                  && (order.status === "PREPARING" || order.status === "READY")
+                  && doneItemCount > 0;
                 const table = tables.find(t => t.id === order.tableId);
                 const orderStatusColor =
                   order.status === "CREATED" ? "#1F5FBF" :
@@ -1263,9 +1265,9 @@ export default function WaiterMobileScreen() {
                     <View style={[styles.orderStatusBadge, { backgroundColor: orderStatusColor }]}>
                       <Text style={styles.orderStatusText}>{ORDER_LABEL[order.status]}</Text>
                     </View>
-                    {readyItemCount > 0 && (
+                    {doneItemCount > 0 && (
                       <View style={styles.readyBadge}>
-                        <Text style={styles.readyBadgeText}>🍽 {readyItemCount} món</Text>
+                        <Text style={styles.readyBadgeText}>🍽 {doneItemCount} món sẵn sàng</Text>
                       </View>
                     )}
                   </View>
@@ -1273,7 +1275,7 @@ export default function WaiterMobileScreen() {
                   {/* Items preview */}
                   <View style={styles.orderItemsPreview}>
                     {order.items.slice(0, 3).map((item) => {
-                      const isReady = item.status === "READY";
+                      const isReady = item.status === "DONE";
                       const menuItem = menuItems.find((m) => m.id === item.menuItemId) || { name: `Món #${item.menuItemId}` };
                       return (
                         <View key={item.id} style={[styles.itemPreviewRow, isReady && styles.itemPreviewRowReady]}>
@@ -1340,9 +1342,10 @@ export default function WaiterMobileScreen() {
                   {selectedOrder?.id === order.id ? (
                     <View style={styles.detailBox}>
                       {selectedOrder.items.map((item) => {
-                        const isReady    = item.status === "READY";
+                        const isReady    = item.status === "DONE";
                         const isServed   = item.status === "SERVED";
-                        const canServe   = (role === "WAITER" || role === "MANAGER") && isReady;
+                        const canServe   = (role === "WAITER" || role === "MANAGER") && isReady
+                          && (selectedOrder.status === "PREPARING" || selectedOrder.status === "READY" || selectedOrder.status === "SERVED");
                         return (
                           <View
                             key={item.id}

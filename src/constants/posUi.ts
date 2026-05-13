@@ -17,10 +17,9 @@ export const ORDER_LABEL: Record<OrderStatus, string> = {
 };
 
 export const ORDER_ITEM_LABEL: Record<OrderItemStatus, string> = {
-  PENDING:   "Chờ xác nhận",
-  CONFIRMED: "Đã xác nhận",
+  PENDING:   "Chờ bếp",
   PREPARING: "Đang nấu",
-  READY:     "Sẵn sàng phục vụ",
+  DONE:      "Bếp xong — Chờ phục vụ",
   SERVED:    "Đã phục vụ",
   CANCELLED: "Đã hủy",
 };
