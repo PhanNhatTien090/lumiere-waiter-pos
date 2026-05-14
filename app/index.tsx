@@ -18,7 +18,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { authAPI, menuAPI, orderAPI, paymentAPI, supportAPI, tableAPI } from "../src/api/endpoints";
+import { authAPI, menuAPI, orderAPI, paymentAPI, recommendationsAPI, supportAPI, tableAPI } from "../src/api/endpoints";
 import {
   ORDER_ITEM_LABEL,
   ORDER_LABEL,
@@ -39,6 +39,7 @@ import {
   OrderStatus,
   PaymentMethod,
   PaymentProvider,
+  RecommendedItem,
   StaffRole,
   SupportRequestResponse,
   SupportRequestStatus,
@@ -138,7 +139,6 @@ export default function WaiterMobileScreen() {
   const [password, setPassword] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   const [refreshing, setRefreshing] = useState(false);
-  const [pollingTick, setPollingTick] = useState(0);
   const [supportRequests, setSupportRequests] = useState<SupportRequestResponse[]>([]);
   const [tableFilter, setTableFilter] = useState<"all" | TableStatus>("all");
   const [tableSearch, setTableSearch] = useState("");
@@ -151,6 +151,11 @@ export default function WaiterMobileScreen() {
   const [createNote, setCreateNote] = useState("");
   const [createOrderCatFilter, setCreateOrderCatFilter] = useState<"all" | number>("all");
   const [submittingOrder, setSubmittingOrder] = useState(false);
+
+  // AI cross-sell recommendations inside create-order modal
+  const [createOrderRecs, setCreateOrderRecs] = useState<RecommendedItem[]>([]);
+  const [createOrderShownIds, setCreateOrderShownIds] = useState<number[]>([]);
+  const createRecCartKeyRef = useRef("");
 
   // Per-status order count for each status chip
   const [orderCountByStatus, setOrderCountByStatus] = useState<Record<string, number>>({});
@@ -393,7 +398,6 @@ export default function WaiterMobileScreen() {
     }
 
     const timerId = setInterval(() => {
-      setPollingTick((value) => value + 1);
       void fetchOrders(orderStatus, true);
     }, 8000);
 
@@ -449,6 +453,46 @@ export default function WaiterMobileScreen() {
       clearInterval(timerId);
     };
   }, [accessToken, activeTab, fetchSupport, role]);
+
+  // Fetch cross-sell recommendations whenever the create-order cart changes
+  useEffect(() => {
+    if (!createOrderTable) {
+      setCreateOrderRecs([]);
+      return;
+    }
+
+    const cartIds = Object.keys(createCart)
+      .map(Number)
+      .filter((id) => (createCart[id] ?? 0) > 0);
+
+    const key = [...cartIds].sort().join(",");
+    if (key === createRecCartKeyRef.current) return;
+    createRecCartKeyRef.current = key;
+
+    if (cartIds.length === 0) {
+      setCreateOrderRecs([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await recommendationsAPI.get({ currentItems: cartIds, topK: 3 });
+        const data = res.data.data;
+        if (!data?.success || !data.items?.length) {
+          setCreateOrderRecs([]);
+          return;
+        }
+        const shownIds = data.items.map((r) => r.menuItemId);
+        setCreateOrderRecs(data.items);
+        setCreateOrderShownIds(shownIds);
+        void recommendationsAPI.log({ shown: shownIds, clicked: [] }).catch(() => {});
+      } catch {
+        setCreateOrderRecs([]);
+      }
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [createCart, createOrderTable]);
 
   const tabs = useMemo(() => {
     if (!role) return [] as Array<{ key: AppTab; label: string }>;
@@ -716,10 +760,17 @@ export default function WaiterMobileScreen() {
     setCreateOrderTable(null);
     setCreateCart({});
     setCreateNote("");
+    setCreateOrderRecs([]);
+    createRecCartKeyRef.current = "";
   }
 
   function handleAddToCart(menuItemId: number) {
     setCreateCart((prev) => ({ ...prev, [menuItemId]: (prev[menuItemId] ?? 0) + 1 }));
+  }
+
+  function handleAddRecommendedItem(menuItemId: number) {
+    handleAddToCart(menuItemId);
+    void recommendationsAPI.log({ shown: createOrderShownIds, clicked: [menuItemId] }).catch(() => {});
   }
 
   function handleRemoveFromCart(menuItemId: number) {
@@ -1488,6 +1539,51 @@ export default function WaiterMobileScreen() {
               <ActivityIndicator style={styles.loader} color="#C9A227" />
             ) : null}
 
+            {createOrderRecs.length > 0 && (
+              <View style={styles.recSection}>
+                <Text style={styles.recSectionTitle}>Gợi ý thêm</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.recRow}
+                >
+                  {createOrderRecs.map((rec) => {
+                    const recItem = menuItems.find((m) => m.id === rec.menuItemId);
+                    if (!recItem) return null;
+                    const recAvailable = recItem.available !== false;
+                    return (
+                      <View key={rec.menuItemId} style={styles.recCard}>
+                        {recItem.imageUrl ? (
+                          <Image source={{ uri: recItem.imageUrl }} style={styles.recCardImg} resizeMode="cover" />
+                        ) : (
+                          <View style={styles.recCardImgFallback}>
+                            <Text style={styles.recCardEmoji}>🍽</Text>
+                          </View>
+                        )}
+                        <View style={styles.recCardBody}>
+                          <Text style={styles.recCardTag}>
+                            {rec.reason === "similar" ? "Tương tự" : "Hay kèm"}
+                          </Text>
+                          <Text style={styles.recCardName} numberOfLines={2}>{recItem.name}</Text>
+                          <Text style={styles.recCardPrice}>{formatMoneyOrContact(recItem.price)}</Text>
+                          {recAvailable ? (
+                            <Pressable
+                              onPress={() => handleAddRecommendedItem(recItem.id)}
+                              style={({ pressed }) => [styles.recAddBtn, pressed && styles.buttonPressed]}
+                            >
+                              <Text style={styles.recAddBtnText}>+ Thêm</Text>
+                            </Pressable>
+                          ) : (
+                            <Text style={styles.recCardUnavailable}>Tạm hết</Text>
+                          )}
+                        </View>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            )}
+
             <View style={styles.mGrid}>
               {filteredCreateOrderItems.map((item) => {
                 const qty = createCart[item.id] ?? 0;
@@ -1944,6 +2040,62 @@ const styles = StyleSheet.create({
   mCatPillActive: { backgroundColor: "#C9A227", borderColor: "#C9A227" },
   mCatPillText: { fontSize: 12, fontWeight: "600", color: "#6B7280" },
   mCatPillTextActive: { color: "#FFFFFF" },
+
+  // ── AI Recommendation strip (inside create-order modal) ──────────────────────
+  recSection: {
+    marginBottom: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    backgroundColor: "#FFFFFF",
+    overflow: "hidden",
+  },
+  recSectionTitle: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#6B7280",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 6,
+  },
+  recRow: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    gap: 10,
+    flexDirection: "row",
+  },
+  recCard: {
+    width: 120,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    backgroundColor: "#F9FAFB",
+    overflow: "hidden",
+  },
+  recCardImg: { width: "100%", height: 64 },
+  recCardImgFallback: {
+    width: "100%",
+    height: 64,
+    backgroundColor: "#F3F0E8",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  recCardEmoji: { fontSize: 24 },
+  recCardBody: { padding: 8, gap: 2 },
+  recCardTag: { fontSize: 9, fontWeight: "700", color: "#6B7280", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 },
+  recCardName: { fontSize: 11, fontWeight: "600", color: "#111827", lineHeight: 15 },
+  recCardPrice: { fontSize: 10, color: "#6B7280" },
+  recAddBtn: {
+    marginTop: 5,
+    borderRadius: 6,
+    backgroundColor: "#1F5FBF",
+    paddingVertical: 4,
+    alignItems: "center",
+  },
+  recAddBtnText: { color: "#FFFFFF", fontSize: 10, fontWeight: "700" },
+  recCardUnavailable: { fontSize: 10, color: "#9CA3AF", marginTop: 4 },
 
   mGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between" },
   mCard: {

@@ -14,6 +14,9 @@ import {
   OrderStatus,
   PaymentResponse,
   PaymentStatusResponse,
+  RecommendationApiRequest,
+  RecommendationApiResponse,
+  RecommendationLogRequest,
   SupportRequestResponse,
   SupportRequestStatus,
   TableResponse,
@@ -78,4 +81,14 @@ export const paymentAPI = {
   createPayment: (payload: CreatePaymentRequest) => axiosInstance.post<ApiResponse<PaymentResponse>>("/payments", payload),
   getOrderPaymentStatus: (orderId: number) =>
     axiosInstance.get<ApiResponse<PaymentStatusResponse>>(`/payments/orders/${orderId}/status`),
+};
+
+export const recommendationsAPI = {
+  /** POST /orders/recommendations — cross-sell suggestions based on current cart items */
+  get: (request: RecommendationApiRequest) =>
+    axiosInstance.post<ApiResponse<RecommendationApiResponse>>("/orders/recommendations", request),
+
+  /** POST /recommendation-logs — report shown/clicked items for CTR learning */
+  log: (request: RecommendationLogRequest) =>
+    axiosInstance.post<ApiResponse<null>>("/recommendation-logs", request),
 };
