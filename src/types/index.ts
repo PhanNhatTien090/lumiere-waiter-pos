@@ -65,6 +65,46 @@ export interface MenuItemResponse {
   cookTime?: number | null;
   available?: boolean;
   imageUrl?: string | null;
+  itemType?: "SINGLE" | "COMBO";
+  comboKind?: "FIXED" | "PICK" | null;
+}
+
+export interface ComboItemSummary {
+  id: number;
+  name: string;
+  description?: string | null;
+  price: number;
+  imageUrl?: string | null;
+  available: boolean;
+}
+
+export interface ComboPickSlot {
+  id: number;
+  name: string;
+  minSelect: number;
+  maxSelect: number;
+  displayOrder: number;
+  allowedItems: ComboItemSummary[];
+}
+
+export interface ComboDetailResponse {
+  id: number;
+  name: string;
+  price: number;
+  imageUrl?: string | null;
+  comboKind: "PICK" | "FIXED";
+  pickSlots?: ComboPickSlot[] | null;
+}
+
+export interface PickComboSelection {
+  slots: Array<{ slotId: number; items: Array<{ menuItemId: number; quantity: number }> }>;
+}
+
+export interface PickComboCartItem {
+  menuItemId: number;
+  name: string;
+  price: number;
+  comboSelection: PickComboSelection;
 }
 
 export type OrderStatus = "CREATED" | "CONFIRMED" | "PREPARING" | "READY" | "SERVED" | "PAID" | "CANCELLED";

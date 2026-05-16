@@ -76,6 +76,11 @@ export const useWaiterStore = create<WaiterStore>((set) => ({
       orders: state.orders.some((existing) => existing.id === order.id)
         ? state.orders.map((existing) => (existing.id === order.id ? order : existing))
         : [order, ...state.orders],
+      // Sync selectedOrder để detail view re-render ngay khi có event WS/poll
+      selectedOrder:
+        state.selectedOrder && state.selectedOrder.id === order.id
+          ? order
+          : state.selectedOrder,
     })),
   setSelectedOrder: (selectedOrder) => set({ selectedOrder }),
 }));

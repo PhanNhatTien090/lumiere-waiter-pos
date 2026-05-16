@@ -34,11 +34,15 @@ import { useWaiterSocket } from "../src/hooks/useWaiterSocket";
 import { useAudioNotification } from "../src/hooks/useAudioNotification";
 import {
   CategoryResponse,
+  ComboDetailResponse,
+  ComboPickSlot,
   MenuItemResponse,
   OrderResponse,
   OrderStatus,
   PaymentMethod,
   PaymentProvider,
+  PickComboCartItem,
+  PickComboSelection,
   StaffRole,
   SupportRequestResponse,
   SupportRequestStatus,
@@ -148,9 +152,18 @@ export default function WaiterMobileScreen() {
   // Create-order modal
   const [createOrderTable, setCreateOrderTable] = useState<TableResponse | null>(null);
   const [createCart, setCreateCart] = useState<Record<number, number>>({});
+  const [createPickCombos, setCreatePickCombos] = useState<PickComboCartItem[]>([]);
   const [createNote, setCreateNote] = useState("");
   const [createOrderCatFilter, setCreateOrderCatFilter] = useState<"all" | number>("all");
   const [submittingOrder, setSubmittingOrder] = useState(false);
+
+  // Pick combo selection modal
+  const [pickComboModal, setPickComboModal] = useState<{
+    item: MenuItemResponse;
+    detail: ComboDetailResponse | null;
+    loading: boolean;
+    selections: Record<number, Record<number, number>>; // slotId → { menuItemId → qty }
+  } | null>(null);
 
   // Per-status order count for each status chip
   const [orderCountByStatus, setOrderCountByStatus] = useState<Record<string, number>>({});
@@ -176,7 +189,13 @@ export default function WaiterMobileScreen() {
         `Order #${payload.orderId} — Bàn #${payload.tableId} đã sẵn sàng phục vụ!`,
         [{ text: "OK" }]
       );
-      void fetchOrders("READY", true);
+      // Refresh CHÍNH order đó để cập nhật status (PREPARING → READY) ngay
+      // — store.upsertOrder cũng đồng bộ selectedOrder để detail view re-render
+      void orderAPI.getOrder(payload.orderId)
+        .then((res) => upsertOrder(res.data.data))
+        .catch(() => { /* polling sẽ sync */ });
+      // Refresh tab hiện tại (không hardcode "READY" để không ghi đè danh sách)
+      void fetchOrders(orderStatus, true);
     },
 
     // /topic/waiter/new-order — customer placed a new order via QR
@@ -538,8 +557,13 @@ export default function WaiterMobileScreen() {
       if (item) total += item.price * qty;
       count += qty;
     });
-    return { total, count, types: Object.keys(createCart).length };
-  }, [createCart, menuItems]);
+    createPickCombos.forEach(pc => {
+      total += pc.price;
+      count += 1;
+    });
+    const types = Object.keys(createCart).length + createPickCombos.length;
+    return { total, count, types };
+  }, [createCart, createPickCombos, menuItems]);
 
   async function handleManualRefresh() {
     setRefreshing(true);
@@ -666,6 +690,33 @@ export default function WaiterMobileScreen() {
     }
   }
 
+  // Doc §8.3.1 — Waiter chỉ cancel được item PENDING (bếp chưa start)
+  async function handleCancelItemInline(orderId: number, itemId: number, itemName: string) {
+    Alert.alert(
+      "Hủy món",
+      `Xác nhận hủy "${itemName}"?\nMón sẽ bị hủy khỏi đơn và bếp sẽ không nấu nữa.`,
+      [
+        { text: "Đóng", style: "cancel" },
+        {
+          text: "Hủy món",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setLoading(true);
+              const response = await orderAPI.cancelItem(orderId, itemId);
+              upsertOrder(response.data.data);
+              await fetchOrders(orderStatus, true);
+            } catch (err: any) {
+              Alert.alert("Lỗi", err?.response?.data?.message || "Không thể hủy món");
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ],
+    );
+  }
+
   async function handleUpdateTable(table: TableResponse) {
     const nextStatus = nextTableStatus(table.status);
 
@@ -715,10 +766,90 @@ export default function WaiterMobileScreen() {
   function handleCloseCreateOrder() {
     setCreateOrderTable(null);
     setCreateCart({});
+    setCreatePickCombos([]);
     setCreateNote("");
+    setPickComboModal(null);
+  }
+
+  async function handleOpenPickCombo(item: MenuItemResponse) {
+    setPickComboModal({ item, detail: null, loading: true, selections: {} });
+    try {
+      const res = await menuAPI.getComboDetail(item.id);
+      setPickComboModal(prev => prev ? { ...prev, detail: res.data.data, loading: false } : null);
+    } catch {
+      setPickComboModal(null);
+      Alert.alert("Lỗi", "Không tải được thông tin combo. Vui lòng thử lại.");
+    }
+  }
+
+  function handlePickComboSelect(slotId: number, menuItemId: number, maxSelect: number) {
+    setPickComboModal(prev => {
+      if (!prev) return null;
+      const slotSel = prev.selections[slotId] ?? {};
+      const currentQty = slotSel[menuItemId] ?? 0;
+      const totalInSlot = Object.values(slotSel).reduce((s, q) => s + q, 0);
+
+      if (currentQty > 0) {
+        // Deselect
+        const updated = { ...slotSel };
+        delete updated[menuItemId];
+        return { ...prev, selections: { ...prev.selections, [slotId]: updated } };
+      }
+      if (totalInSlot >= maxSelect) {
+        Alert.alert("Giới hạn", `Slot này chỉ chọn tối đa ${maxSelect} món.`);
+        return prev;
+      }
+      return {
+        ...prev,
+        selections: { ...prev.selections, [slotId]: { ...slotSel, [menuItemId]: 1 } },
+      };
+    });
+  }
+
+  function handleConfirmPickCombo() {
+    if (!pickComboModal?.detail) return;
+    const slots = pickComboModal.detail.pickSlots ?? [];
+
+    for (const slot of slots) {
+      const sel = pickComboModal.selections[slot.id] ?? {};
+      const total = Object.values(sel).reduce((s, q) => s + q, 0);
+      if (total < slot.minSelect) {
+        Alert.alert("Chưa đủ", `Slot "${slot.name}" cần chọn ít nhất ${slot.minSelect} món.`);
+        return;
+      }
+    }
+
+    const comboSelection: PickComboSelection = {
+      slots: slots
+        .map(slot => ({
+          slotId: slot.id,
+          items: Object.entries(pickComboModal.selections[slot.id] ?? {}).map(([mid, qty]) => ({
+            menuItemId: Number(mid),
+            quantity: qty,
+          })),
+        }))
+        .filter(s => s.items.length > 0),
+    };
+
+    setCreatePickCombos(prev => [...prev, {
+      menuItemId: pickComboModal.item.id,
+      name: pickComboModal.item.name,
+      price: pickComboModal.item.price,
+      comboSelection,
+    }]);
+    setPickComboModal(null);
+  }
+
+  function handleRemovePickCombo(index: number) {
+    setCreatePickCombos(prev => prev.filter((_, i) => i !== index));
   }
 
   function handleAddToCart(menuItemId: number) {
+    const item = menuItems.find((m) => m.id === menuItemId);
+    if (item?.itemType === "COMBO" && item?.comboKind === "PICK") {
+      void handleOpenPickCombo(item);
+      return;
+    }
     setCreateCart((prev) => ({ ...prev, [menuItemId]: (prev[menuItemId] ?? 0) + 1 }));
   }
 
@@ -735,14 +866,23 @@ export default function WaiterMobileScreen() {
 
   async function handleSubmitCreateOrder() {
     if (!createOrderTable) return;
-    const items = Object.entries(createCart)
+    const singleAndFixedItems = Object.entries(createCart)
       .filter(([, qty]) => qty > 0)
       .map(([id, qty]) => ({
         menuItemId: Number(id),
         quantity: qty,
-        note: null,
-        comboSelection: null,
+        note: null as null,
+        comboSelection: null as null,
       }));
+
+    const pickComboItems = createPickCombos.map(pc => ({
+      menuItemId: pc.menuItemId,
+      quantity: 1,
+      note: null as null,
+      comboSelection: pc.comboSelection,
+    }));
+
+    const items = [...singleAndFixedItems, ...pickComboItems];
 
     if (items.length === 0) {
       Alert.alert("Thiếu thông tin", "Vui lòng chọn ít nhất 1 món trước khi tạo đơn.");
@@ -1344,16 +1484,26 @@ export default function WaiterMobileScreen() {
                       {selectedOrder.items.map((item) => {
                         const isReady    = item.status === "DONE";
                         const isServed   = item.status === "SERVED";
+                        const isCancelled = item.status === "CANCELLED";
                         const canServe   = (role === "WAITER" || role === "MANAGER") && isReady
                           && (selectedOrder.status === "PREPARING" || selectedOrder.status === "READY" || selectedOrder.status === "SERVED");
+                        // Doc §8.3.1 — Waiter cancel item-level chỉ khi item PENDING (bếp chưa start)
+                        const canCancelItem = (role === "WAITER" || role === "MANAGER")
+                          && item.status === "PENDING"
+                          && item.billable !== false
+                          && selectedOrder.status !== "PAID"
+                          && selectedOrder.status !== "CANCELLED";
+                        const itemName = menuItems.find((m) => m.id === item.menuItemId)?.name
+                          ?? menuItemNames[item.menuItemId]
+                          ?? `Món #${item.menuItemId}`;
                         return (
                           <View
                             key={item.id}
                             style={[styles.rowBetween, styles.detailRow, isReady && styles.detailRowReady]}
                           >
                             <View style={{ flex: 1, marginRight: 8 }}>
-                              <Text style={[styles.detailText, isServed && styles.detailTextMuted]}>
-                                {(menuItems.find((m) => m.id === item.menuItemId)?.name ?? menuItemNames[item.menuItemId] ?? `Món #${item.menuItemId}`) + ` ×${item.quantity}`}
+                              <Text style={[styles.detailText, (isServed || isCancelled) && styles.detailTextMuted]}>
+                                {itemName + ` ×${item.quantity}`}
                                 {item.note ? `  · ${item.note}` : ""}
                               </Text>
                               <Text style={[
@@ -1370,6 +1520,13 @@ export default function WaiterMobileScreen() {
                                 onPress={() => void handleServeItem(order.id, item.id)}
                               >
                                 <Text style={styles.serveButtonText}>Phục vụ</Text>
+                              </Pressable>
+                            ) : canCancelItem ? (
+                              <Pressable
+                                style={({ pressed }) => [styles.dangerButton, pressed && styles.buttonPressed]}
+                                onPress={() => void handleCancelItemInline(order.id, item.id, itemName)}
+                              >
+                                <Text style={styles.dangerButtonText}>Hủy món</Text>
                               </Pressable>
                             ) : null}
                           </View>
@@ -1492,6 +1649,7 @@ export default function WaiterMobileScreen() {
               {filteredCreateOrderItems.map((item) => {
                 const qty = createCart[item.id] ?? 0;
                 const isAvailable = item.available !== false;
+                const isPickCombo = item.itemType === "COMBO" && item.comboKind === "PICK";
                 return (
                   <View key={item.id} style={styles.mCard}>
                     <View style={styles.mCardImgWrap}>
@@ -1505,6 +1663,11 @@ export default function WaiterMobileScreen() {
                       {!isAvailable && (
                         <View style={styles.mCardDimOverlay}>
                           <Text style={styles.mCardDimText}>Tạm hết</Text>
+                        </View>
+                      )}
+                      {isPickCombo && (
+                        <View style={styles.mCardQrBadge}>
+                          <Text style={styles.mCardQrBadgeText}>QR</Text>
                         </View>
                       )}
                     </View>
@@ -1551,6 +1714,26 @@ export default function WaiterMobileScreen() {
             )}
           </ScrollView>
 
+          {/* ── Pick combo items added ── */}
+          {createPickCombos.length > 0 && (
+            <View style={styles.pickComboList}>
+              {createPickCombos.map((pc, idx) => (
+                <View key={idx} style={styles.pickComboRow}>
+                  <View style={styles.flex1}>
+                    <Text style={styles.pickComboName}>{pc.name}</Text>
+                    <Text style={styles.pickComboSub}>
+                      {pc.comboSelection.slots.flatMap(s => s.items.map(i => `${i.quantity}× #${i.menuItemId}`)).join(", ")}
+                    </Text>
+                  </View>
+                  <Text style={styles.pickComboPrice}>{formatMoney(pc.price)}</Text>
+                  <Pressable onPress={() => handleRemovePickCombo(idx)} style={styles.pickComboRemove}>
+                    <Text style={styles.pickComboRemoveText}>✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
+
           <View style={styles.coNoteWrap}>
             <TextInput
               style={styles.coNoteInput}
@@ -1582,6 +1765,94 @@ export default function WaiterMobileScreen() {
               </Text>
             </Pressable>
           </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* ─── Pick Combo Selection Modal ──────────────────────────────── */}
+      <Modal
+        visible={!!pickComboModal}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setPickComboModal(null)}
+      >
+        <SafeAreaView style={styles.coShell} edges={["top", "left", "right", "bottom"]}>
+          <View style={styles.coHeader}>
+            <Pressable
+              style={({ pressed }) => [styles.coCloseBtn, pressed && styles.buttonPressed]}
+              onPress={() => setPickComboModal(null)}
+            >
+              <Text style={styles.coCloseBtnText}>← Hủy</Text>
+            </Pressable>
+            <View style={styles.flex1}>
+              <Text style={styles.coTitle}>Chọn thành phần</Text>
+              <Text style={styles.coSubtitle}>{pickComboModal?.item.name ?? ""}</Text>
+            </View>
+          </View>
+
+          {pickComboModal?.loading ? (
+            <ActivityIndicator style={styles.loader} color="#C9A227" />
+          ) : (
+            <ScrollView style={styles.flex1} contentContainerStyle={{ padding: 12, gap: 16 }}>
+              {(pickComboModal?.detail?.pickSlots ?? []).map((slot: ComboPickSlot) => {
+                const sel = pickComboModal?.selections[slot.id] ?? {};
+                const totalSel = Object.values(sel).reduce((s, q) => s + q, 0);
+                return (
+                  <View key={slot.id} style={styles.pickSlotCard}>
+                    <View style={styles.pickSlotHeader}>
+                      <Text style={styles.pickSlotName}>{slot.name}</Text>
+                      <Text style={styles.pickSlotMeta}>
+                        {totalSel}/{slot.maxSelect} · tối thiểu {slot.minSelect}
+                      </Text>
+                    </View>
+                    {slot.allowedItems.map(allowedItem => {
+                      const qty = sel[allowedItem.id] ?? 0;
+                      const isSelected = qty > 0;
+                      return (
+                        <Pressable
+                          key={allowedItem.id}
+                          style={({ pressed }) => [
+                            styles.pickSlotItem,
+                            isSelected && styles.pickSlotItemSelected,
+                            !allowedItem.available && styles.pickSlotItemDisabled,
+                            pressed && styles.buttonPressed,
+                          ]}
+                          onPress={() => allowedItem.available && handlePickComboSelect(slot.id, allowedItem.id, slot.maxSelect)}
+                          disabled={!allowedItem.available}
+                        >
+                          <View style={styles.flex1}>
+                            <Text style={[styles.pickSlotItemName, isSelected && styles.pickSlotItemNameSelected]}>
+                              {allowedItem.name}
+                            </Text>
+                            {!allowedItem.available && (
+                              <Text style={styles.pickSlotItemUnavail}>Tạm hết</Text>
+                            )}
+                          </View>
+                          <View style={[styles.pickSlotCheck, isSelected && styles.pickSlotCheckSelected]}>
+                            {isSelected && <Text style={styles.pickSlotCheckMark}>✓</Text>}
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                );
+              })}
+            </ScrollView>
+          )}
+
+          {!pickComboModal?.loading && (
+            <View style={styles.coFooter}>
+              <View style={styles.flex1}>
+                <Text style={styles.coFooterMeta}>{pickComboModal?.item.name}</Text>
+                <Text style={styles.coFooterTotal}>{formatMoney(pickComboModal?.item.price ?? 0)}</Text>
+              </View>
+              <Pressable
+                style={({ pressed }) => [styles.coSubmitBtn, pressed && styles.buttonPressed]}
+                onPress={handleConfirmPickCombo}
+              >
+                <Text style={styles.coSubmitBtnText}>Thêm vào đơn</Text>
+              </Pressable>
+            </View>
+          )}
         </SafeAreaView>
       </Modal>
     </SafeAreaView>
@@ -1969,6 +2240,83 @@ const styles = StyleSheet.create({
     borderRadius: 0,
   },
   mCardDimText: { color: "#FFFFFF", fontSize: 11, fontWeight: "700", letterSpacing: 0.5 },
+  mCardQrBadge: {
+    position: "absolute",
+    top: 6,
+    left: 6,
+    backgroundColor: "#1F5FBF",
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  mCardQrBadgeText: { color: "#FFFFFF", fontSize: 9, fontWeight: "800" },
+  pickComboList: {
+    backgroundColor: "#F0F4FF",
+    borderTopWidth: 1,
+    borderTopColor: "#D7E0E8",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  pickComboRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 8,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: "#D7E0E8",
+  },
+  pickComboName: { fontSize: 13, fontWeight: "700", color: "#0F172A" },
+  pickComboSub: { fontSize: 11, color: "#64748B", marginTop: 2 },
+  pickComboPrice: { fontSize: 13, fontWeight: "700", color: "#1F5FBF" },
+  pickComboRemove: { padding: 4 },
+  pickComboRemoveText: { color: "#EF4444", fontWeight: "700", fontSize: 14 },
+  pickSlotCard: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#D7E0E8",
+    backgroundColor: "#FFFFFF",
+    overflow: "hidden",
+  },
+  pickSlotHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#F8FAFC",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#D7E0E8",
+  },
+  pickSlotName: { fontSize: 14, fontWeight: "700", color: "#0F172A" },
+  pickSlotMeta: { fontSize: 12, color: "#64748B" },
+  pickSlotItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F1F5F9",
+    gap: 10,
+  },
+  pickSlotItemSelected: { backgroundColor: "#EAF1FB" },
+  pickSlotItemDisabled: { opacity: 0.45 },
+  pickSlotItemName: { fontSize: 13, color: "#0F172A" },
+  pickSlotItemNameSelected: { color: "#1F5FBF", fontWeight: "600" },
+  pickSlotItemUnavail: { fontSize: 11, color: "#EF4444", marginTop: 2 },
+  pickSlotCheck: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: "#D7E0E8",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pickSlotCheckSelected: { backgroundColor: "#1F5FBF", borderColor: "#1F5FBF" },
+  pickSlotCheckMark: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
   mCardAddBtn: {
     position: "absolute",
     bottom: 8,

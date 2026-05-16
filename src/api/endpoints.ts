@@ -4,6 +4,7 @@ import {
   AuthPayload,
   CancelOrderRequest,
   CategoryResponse,
+  ComboDetailResponse,
   CreateOrderRequest,
   CreatePaymentRequest,
   CreateSupportRequest,
@@ -40,6 +41,8 @@ export const menuAPI = {
     axiosInstance.get<ApiResponse<MenuItemResponse[]>>("/menu/items", { params: { categoryId } }),
   getMenuItem: (menuItemId: number) =>
     axiosInstance.get<ApiResponse<MenuItemResponse>>(`/menu/items/${menuItemId}`),
+  getComboDetail: (menuItemId: number) =>
+    axiosInstance.get<ApiResponse<ComboDetailResponse>>(`/menu/items/${menuItemId}/combo`),
 };
 
 export const orderAPI = {
@@ -58,6 +61,8 @@ export const orderAPI = {
   serveItem: (orderId: number, itemId: number) =>
     axiosInstance.put<ApiResponse<OrderResponse>>(`/orders/${orderId}/items/${itemId}/serve`),
   serveAll: (orderId: number) => axiosInstance.put<ApiResponse<OrderResponse>>(`/orders/${orderId}/serve-all`),
+  cancelItem: (orderId: number, itemId: number) =>
+    axiosInstance.put<ApiResponse<OrderResponse>>(`/orders/${orderId}/items/${itemId}/cancel`),
 };
 
 /** WAITER / MANAGER */
