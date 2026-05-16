@@ -244,3 +244,28 @@ export interface UpdateSupportStatusBody {
 
 /** Invoice JSON from BillingService.generateInvoice — shape evolves with backend */
 export type OrderInvoiceJson = Record<string, unknown>;
+
+// ─── AI Cross-sell Recommendations ──────────────────────────────────────────
+
+export interface RecommendationApiRequest {
+  currentItems: number[];
+  topK: number;
+}
+
+export interface RecommendedItem {
+  menuItemId: number;
+  score: number;
+  reason: "combo+popularity" | "similar" | string;
+}
+
+export interface RecommendationApiResponse {
+  success: boolean;
+  source: "model" | "fallback" | "timeout" | "error" | "backend-fallback";
+  modelVersion: string | null;
+  items: RecommendedItem[];
+}
+
+export interface RecommendationLogRequest {
+  shown: number[];
+  clicked: number[];
+}
