@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -16,6 +15,7 @@ import { ORDER_LABEL, TABLE_COLOR, TABLE_LABEL, formatMoney, nextTableStatus } f
 import { useWaiterStore } from "../../src/store/waiterStore";
 import { useWaiterSocket } from "../../src/hooks/useWaiterSocket";
 import { OrderResponse, TableResponse } from "../../src/types";
+import { confirmAction, notify } from "../../src/lib/confirm";
 
 const POS_NEUTRAL = {
   shell: "#F4F6F8",
@@ -44,7 +44,7 @@ const ITEM_STATUS_LABEL: Record<string, string> = {
   CANCELLED: "Đã hủy",
 };
 
-const CANCELLABLE_STATUSES = new Set(["PENDING"]);
+const CANCELLABLE_STATUSES = new Set(["PENDING", "PREPARING"]);
 
 export default function TableDetailScreen() {
   const router = useRouter();
@@ -170,53 +170,67 @@ export default function TableDetailScreen() {
   }
 
   async function handleConfirmOrder(orderId: number) {
-    Alert.alert(
-      "Xác nhận thêm món",
-      "Gửi các món vừa thêm xuống bếp?",
-      [
-        { text: "Hủy", style: "cancel" },
-        {
-          text: "Xác nhận",
-          onPress: async () => {
-            setConfirmingOrderId(orderId);
-            try {
-              await orderAPI.confirmOrder(orderId);
-              await loadData(true);
-              Alert.alert("Thành công", "Đã gửi món mới xuống bếp.");
-            } catch (err: any) {
-              Alert.alert("Lỗi", err?.response?.data?.message || "Xác nhận thất bại");
-            } finally {
-              setConfirmingOrderId(null);
-            }
-          },
-        },
-      ],
-    );
+    const ok = await confirmAction({
+      title: "Xác nhận thêm món",
+      message: "Gửi các món vừa thêm xuống bếp?",
+      confirmLabel: "Xác nhận",
+      cancelLabel: "Hủy",
+    });
+    if (!ok) return;
+
+    setConfirmingOrderId(orderId);
+    try {
+      await orderAPI.confirmOrder(orderId);
+      await loadData(true);
+      notify("Thành công", "Đã gửi món mới xuống bếp.");
+    } catch (err: any) {
+      notify("Lỗi", err?.response?.data?.message || "Xác nhận thất bại");
+    } finally {
+      setConfirmingOrderId(null);
+    }
   }
 
   async function handleCancelItem(orderId: number, itemId: number, itemName: string) {
-    Alert.alert(
-      "Hủy món",
-      `Xác nhận hủy "${itemName}"?\nMón sẽ bị hủy khỏi đơn và bếp sẽ không nấu nữa.`,
-      [
-        { text: "Đóng", style: "cancel" },
-        {
-          text: "Hủy món",
-          style: "destructive",
-          onPress: async () => {
-            setCancellingItemId(itemId);
-            try {
-              await orderAPI.cancelItem(orderId, itemId);
-              await loadData(true);
-            } catch (err: any) {
-              Alert.alert("Lỗi", err?.response?.data?.message || "Không thể hủy món");
-            } finally {
-              setCancellingItemId(null);
-            }
-          },
-        },
-      ],
-    );
+    console.log("[cancelItem] pressed", { orderId, itemId, itemName });
+
+    const ok = await confirmAction({
+      title: "Hủy món",
+      message: `Xác nhận hủy "${itemName}"?\nMón sẽ bị hủy khỏi đơn và bếp sẽ không nấu nữa.`,
+      confirmLabel: "Hủy món",
+      cancelLabel: "Đóng",
+      destructive: true,
+    });
+    if (!ok) {
+      console.log("[cancelItem] user dismissed confirm");
+      return;
+    }
+
+    setCancellingItemId(itemId);
+    try {
+      console.log("[cancelItem] calling API", { orderId, itemId });
+      const res = await orderAPI.cancelItem(orderId, itemId);
+      console.log("[cancelItem] API ok", res.status, res.data?.message);
+      await loadData(true);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const serverMsg = err?.response?.data?.message;
+      // Surface the actual backend rejection — without this, "Không thể hủy món"
+      // hides why (kitchen already started, order paid, role missing, etc.)
+      console.warn(
+        "[cancelItem] failed",
+        { orderId, itemId, status, serverMsg, raw: err?.response?.data, err: err?.message }
+      );
+      notify(
+        "Không hủy được món",
+        serverMsg
+          ? `${serverMsg}`
+          : status === 401 || status === 403
+          ? "Phiên đăng nhập đã hết hạn hoặc bạn không có quyền."
+          : "Không thể hủy món. Kiểm tra kết nối mạng và thử lại."
+      );
+    } finally {
+      setCancellingItemId(null);
+    }
   }
 
   async function handleUpdateTableStatus() {
@@ -226,7 +240,7 @@ export default function TableDetailScreen() {
       setLoading(true);
       const response = await tableAPI.updateStatus(table.tableCode, { status: nextStatus });
       setTable(response.data.data);
-      Alert.alert("Cập nhật bàn", `Đã chuyển sang trạng thái ${TABLE_LABEL[nextStatus]}.`);
+      notify("Cập nhật bàn", `Đã chuyển sang trạng thái ${TABLE_LABEL[nextStatus]}.`);
     } catch (err: any) {
       setError(err?.response?.data?.message || "Cập nhật trạng thái bàn thất bại");
     } finally {
@@ -312,7 +326,15 @@ export default function TableDetailScreen() {
                   <View style={styles.itemList}>
                     {activeItems.map((item) => {
                       const name = menuItemNames.get(item.menuItemId) ?? `Món #${item.menuItemId}`;
-                      const canCancel = CANCELLABLE_STATUSES.has(item.status) && canUpdateTable;
+                      // Order must be in a revision-eligible state and the item must still be PENDING.
+                      // PAID/CANCELLED orders are rejected by the backend regardless of item status.
+                      const orderRevisionAllowed =
+                        order.status !== "PAID" && order.status !== "CANCELLED";
+                      const canCancel =
+                        CANCELLABLE_STATUSES.has(item.status) &&
+                        canUpdateTable &&
+                        orderRevisionAllowed &&
+                        item.billable !== false;
                       const isCancelling = cancellingItemId === item.id;
                       return (
                         <View key={item.id} style={styles.itemRow}>

@@ -32,6 +32,7 @@ import {
 import { useWaiterStore } from "../src/store/waiterStore";
 import { useWaiterSocket } from "../src/hooks/useWaiterSocket";
 import { useAudioNotification } from "../src/hooks/useAudioNotification";
+import { confirmAction, notify } from "../src/lib/confirm";
 import {
   CategoryResponse,
   ComboDetailResponse,
@@ -143,6 +144,10 @@ export default function WaiterMobileScreen() {
   const [password, setPassword] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASH");
   const [refreshing, setRefreshing] = useState(false);
+  // Per-item in-flight state for "Hủy món" — global setLoading also dims the
+  // whole screen, but this lets the specific button show a "…" + disabled state
+  // and prevents double-tap re-submission.
+  const [cancellingItemId, setCancellingItemId] = useState<number | null>(null);
   const [supportRequests, setSupportRequests] = useState<SupportRequestResponse[]>([]);
   const [tableFilter, setTableFilter] = useState<"all" | TableStatus>("all");
   const [tableSearch, setTableSearch] = useState("");
@@ -733,31 +738,51 @@ export default function WaiterMobileScreen() {
     }
   }
 
-  // Doc §8.3.1 — Waiter chỉ cancel được item PENDING (bếp chưa start)
+  // Waiter cancels item-level cho cả PENDING & PREPARING — backend tự cascade
+  // huỷ kitchen task và OrderItemCancelledEvent.
   async function handleCancelItemInline(orderId: number, itemId: number, itemName: string) {
-    Alert.alert(
-      "Hủy món",
-      `Xác nhận hủy "${itemName}"?\nMón sẽ bị hủy khỏi đơn và bếp sẽ không nấu nữa.`,
-      [
-        { text: "Đóng", style: "cancel" },
-        {
-          text: "Hủy món",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              setLoading(true);
-              const response = await orderAPI.cancelItem(orderId, itemId);
-              upsertOrder(response.data.data);
-              await fetchOrders(orderStatus, true);
-            } catch (err: any) {
-              Alert.alert("Lỗi", err?.response?.data?.message || "Không thể hủy món");
-            } finally {
-              setLoading(false);
-            }
-          },
-        },
-      ],
-    );
+    if (cancellingItemId != null) return; // guard against double-tap
+    console.log("[cancelItem] pressed", { orderId, itemId, itemName });
+
+    const ok = await confirmAction({
+      title: "Hủy món",
+      message: `Xác nhận hủy "${itemName}"?\nMón sẽ bị hủy khỏi đơn và bếp sẽ không nấu nữa.`,
+      confirmLabel: "Hủy món",
+      cancelLabel: "Đóng",
+      destructive: true,
+    });
+    if (!ok) {
+      console.log("[cancelItem] user dismissed confirm");
+      return;
+    }
+
+    setCancellingItemId(itemId);
+    try {
+      console.log("[cancelItem] calling API", { orderId, itemId });
+      const response = await orderAPI.cancelItem(orderId, itemId);
+      console.log("[cancelItem] API ok", response.status, response.data?.message);
+      upsertOrder(response.data.data);
+      await fetchOrders(orderStatus, true);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const serverMsg = err?.response?.data?.message;
+      // Surface the real backend rejection — the generic fallback hides
+      // the actual reason (kitchen already started, role denied, etc.).
+      console.warn(
+        "[cancelItem] failed",
+        { orderId, itemId, status, serverMsg, raw: err?.response?.data, err: err?.message }
+      );
+      notify(
+        "Không hủy được món",
+        serverMsg
+          ? serverMsg
+          : status === 401 || status === 403
+          ? "Phiên đăng nhập đã hết hạn hoặc bạn không có quyền."
+          : "Không thể hủy món. Kiểm tra kết nối mạng và thử lại."
+      );
+    } finally {
+      setCancellingItemId(null);
+    }
   }
 
   async function handleUpdateTable(table: TableResponse) {
@@ -1537,9 +1562,10 @@ export default function WaiterMobileScreen() {
                         const isCancelled = item.status === "CANCELLED";
                         const canServe   = (role === "WAITER" || role === "MANAGER") && isReady
                           && (selectedOrder.status === "PREPARING" || selectedOrder.status === "READY" || selectedOrder.status === "SERVED");
-                        // Doc §8.3.1 — Waiter cancel item-level chỉ khi item PENDING (bếp chưa start)
+                        // Waiter cancel item-level cho PENDING hoặc PREPARING — backend xử lý
+                        // việc hủy luôn kitchen task đang nấu.
                         const canCancelItem = (role === "WAITER" || role === "MANAGER")
-                          && item.status === "PENDING"
+                          && (item.status === "PENDING" || item.status === "PREPARING")
                           && item.billable !== false
                           && selectedOrder.status !== "PAID"
                           && selectedOrder.status !== "CANCELLED";
@@ -1573,10 +1599,17 @@ export default function WaiterMobileScreen() {
                               </Pressable>
                             ) : canCancelItem ? (
                               <Pressable
-                                style={({ pressed }) => [styles.dangerButton, pressed && styles.buttonPressed]}
+                                style={({ pressed }) => [
+                                  styles.dangerButton,
+                                  pressed && styles.buttonPressed,
+                                  cancellingItemId === item.id && { opacity: 0.5 },
+                                ]}
                                 onPress={() => void handleCancelItemInline(order.id, item.id, itemName)}
+                                disabled={cancellingItemId === item.id}
                               >
-                                <Text style={styles.dangerButtonText}>Hủy món</Text>
+                                <Text style={styles.dangerButtonText}>
+                                  {cancellingItemId === item.id ? "Đang hủy…" : "Hủy món"}
+                                </Text>
                               </Pressable>
                             ) : null}
                           </View>
